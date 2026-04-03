@@ -10,19 +10,43 @@ def load_env():
         with open(env_path) as f:
             for line in f:
                 if '=' in line and not line.strip().startswith('#'):
-                    k, v = line.strip().split('=', 1)
-                    os.environ[k.strip()] = v.strip().strip('"').strip("'")
+                    parts = line.strip().split('=', 1)
+                    if len(parts) == 2:
+                        k, v = parts
+                        os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
-def main():
+def upload_to_s3(file_path, bucket, object_name):
+    import boto3
+    from botocore.exceptions import NoCredentialsError
+    s3 = boto3.client('s3')
+    try:
+        s3.upload_file(file_path, bucket, object_name)
+        print(f">>> Artifact {object_name} uploaded to S3 bucket {bucket}")
+        return True
+    except FileNotFoundError:
+        print("The file was not found")
+        return False
+    except NoCredentialsError:
+        print("Credentials not available")
+        return False
+
+def run_bridge(agent_id=None, identifier=None):
     load_env()
     try:
-        agent_id = os.environ.get("PAPERCLIP_AGENT_ID")
         if not agent_id:
-            sys.exit(1)
+            agent_id = os.environ.get("PAPERCLIP_AGENT_ID")
+        
+        if not agent_id:
+            print(">>> ERROR: No Agent ID provided!")
+            return False
             
-        # Query the DB for the assigned issue currently 'in_progress' or 'todo'
-        cmd = ["psql", "-h", "localhost", "-p", "5433", "-U", "paperclip", "-d", "paperclip", "-t", "-c", 
-            f"SELECT identifier, title, description, company_id FROM issues WHERE assignee_agent_id = '{agent_id}' AND status IN ('in_progress', 'todo') ORDER BY created_at DESC LIMIT 1;"]
+        # Refined query to prioritize the specific identifier if provided
+        query = f"SELECT identifier, title, description, company_id FROM issues WHERE assignee_agent_id = '{agent_id}'"
+        if identifier:
+            query += f" AND identifier = '{identifier}'"
+        else:
+            query += " AND status IN ('in_progress', 'todo')"
+        query += " ORDER BY created_at DESC LIMIT 1;"
         
         env = os.environ.copy()
         env["PGPASSWORD"] = "paperclip"
@@ -54,38 +78,81 @@ def main():
         target_model = os.environ.get("OPENCLAW_MODEL", "openai/gpt-4o")
         subprocess.run(["/usr/bin/openclaw", "models", "set", target_model], env=env, check=False)
         
-        subprocess.run("rm -rf /tmp/zero-human-sandbox/*", shell=True, check=False)
-        subprocess.run(["mkdir", "-p", "/tmp/zero-human-sandbox"], check=False)
+        sandbox_path = f"/tmp/zero-human-sandbox/{identifier}"
+        subprocess.run(f"rm -rf {sandbox_path}", shell=True, check=False)
+        subprocess.run(["mkdir", "-p", sandbox_path], check=False)
         
-        for role in agent_roles:
-            message = f"You are {role}. This is step in a 4-agent cascade pipeline handling Ticket: {identifier} - {title}. Output explicit terminal logs narrating your specific role's action. Instructions: {description}. Execute strictly autonomously in /tmp/zero-human-sandbox/, use tools if needed, and exit smoothly when your phase is complete."
-            print(f">>> Reassigning Ticket {identifier} to {role} ...")
+        # 1. The Architect
+        architect_msg = f"You are The Architect. This is the first step in a multi-agent pipeline handling Ticket: {identifier} - {title}. Your goal is to research the codebase and output a high-level implementation plan. Instructions: {description}. Execute strictly autonomously in {sandbox_path}, use tools if needed, and exit smoothly when your phase is complete."
+        print(f">>> Executing The Architect for Ticket {identifier} ...")
+        subprocess.run(["/usr/bin/openclaw", "agent", "--agent", "main", "-m", architect_msg], env=env, check=True)
+
+        # 2. Iterative Dev/QA Loop (Grunt & Pedant)
+        max_retries = 3
+        retry_count = 0
+        while retry_count < max_retries:
+            # The Grunt
+            grunt_msg = f"You are The Grunt. This is a development step for Ticket: {identifier}. Your goal is to implement the changes requested. Instructions: {description}. work in {sandbox_path}. If this is a retry, incorporate the feedback from the Pedant below."
+            if retry_count > 0:
+                grunt_msg += f"\n\nPREVIOUS QA FEEDBACK: {last_qa_report}"
             
-            result = subprocess.run(["/usr/bin/openclaw", "agent", "--agent", "main", "-m", message], env=env, check=False, capture_output=True, text=True)
+            print(f">>> Executing The Grunt (Attempt {retry_count + 1}) ...")
+            subprocess.run(["/usr/bin/openclaw", "agent", "--agent", "main", "-m", grunt_msg], env=env, check=True)
+
+            # The Pedant
+            pedant_msg = f"You are The Pedant. Your goal is to conduct a syntax check and manual-style verification of the work done by The Grunt in {sandbox_path}. Instructions: {description}. If the work is incomplete or has errors, start your response with 'VERIFICATION_FAILED:' followed by the issues. If it is correct, start with 'VERIFICATION_PASSED'."
+            print(f">>> Executing The Pedant for QA ...")
+            result = subprocess.run(["/usr/bin/openclaw", "agent", "--agent", "main", "-m", pedant_msg], env=env, capture_output=True, text=True)
             
-            if result.stdout: print(result.stdout)
-            if result.stderr: print(result.stderr, file=sys.stderr)
-            
-            if result.returncode != 0:
-                print(f"Agent {role} failed! Code: {result.returncode}")
-                error_body = (result.stderr if result.stderr else result.stdout)[-800:].replace("'", "''")
-                safe_msg = f"**{role} crashed during execution!**\n\nThe AI Pipeline encountered a terminal system error and failed to generate the Pull Request:\n\n```plaintext\n{error_body}\n```"
-                
-                subprocess.run(["psql", "-h", "localhost", "-p", "5433", "-U", "paperclip", "-d", "paperclip", "-c", 
-                                f"INSERT INTO issue_comments (id, company_id, issue_id, author_agent_id, body, created_at, updated_at) VALUES (gen_random_uuid(), (SELECT company_id FROM issues WHERE identifier='{identifier}'), (SELECT id FROM issues WHERE identifier='{identifier}'), '{agent_id}', '{safe_msg}', NOW(), NOW());"], env=env)
-                subprocess.run(["psql", "-h", "localhost", "-p", "5433", "-U", "paperclip", "-d", "paperclip", "-c", f"UPDATE issues SET status = 'error', completed_at = NOW() WHERE identifier = '{identifier}';"], env=env)
-                sys.exit(1)
-            time.sleep(1)
-        
+            last_qa_report = result.stdout if result.stdout else ""
+            if "VERIFICATION_PASSED" in last_qa_report:
+                print(">>> QA Passed! Proceeding to deployment.")
+                break
+            else:
+                print(f">>> QA Failed (Attempt {retry_count + 1}). Looping back to Grunt.")
+                retry_count += 1
+                if retry_count == max_retries:
+                    print(">>> Max retries reached. Failing the pipeline.")
+                    # Handle failure
+                    safe_msg = f"**Pipeline failed after {max_retries} attempts!**\n\nThe Pedant kept failing verification:\n\n```plaintext\n{last_qa_report[-800:]}\n```"
+                    safe_msg_sql = safe_msg.replace("'", "''")
+                    subprocess.run(["psql", "-h", "localhost", "-p", "5433", "-U", "paperclip", "-d", "paperclip", "-c", 
+                                    f"INSERT INTO issue_comments (id, company_id, issue_id, author_agent_id, body, created_at, updated_at) VALUES (gen_random_uuid(), (SELECT company_id FROM issues WHERE identifier='{identifier}'), (SELECT id FROM issues WHERE identifier='{identifier}'), '{agent_id}', '{safe_msg_sql}', NOW(), NOW());"], env=env)
+                    subprocess.run(["psql", "-h", "localhost", "-p", "5433", "-U", "paperclip", "-d", "paperclip", "-c", f"UPDATE issues SET status = 'error', completed_at = NOW() WHERE identifier = '{identifier}';"], env=env)
+                    return False
+
+        # 3. The Scribe
+        scribe_msg = f"You are The Scribe. The work in {sandbox_path} has been verified for Ticket: {identifier}. Your goal is to document the changes and create the final Pull Request (or final report). Instructions: {description}. Exit smoothly when complete."
+        print(f">>> Executing The Scribe for Deployment ...")
+        subprocess.run(["/usr/bin/openclaw", "agent", "--agent", "main", "-m", scribe_msg], env=env, check=True)
+
+        # 4. S3 Persistence (v2 Placeholder)
+        bucket_name = os.environ.get("AWS_S3_BUCKET")
+        if bucket_name:
+            import tarfile
+            archive_name = f"{identifier}_workspace.tar.gz"
+            archive_path = os.path.join("/tmp", archive_name)
+            with tarfile.open(archive_path, "w:gz") as tar:
+                tar.add(sandbox_path, arcname=os.path.basename(sandbox_path))
+            upload_to_s3(archive_path, bucket_name, f"builds/{archive_name}")
+            os.remove(archive_path)
+
         # Complete issue in Postgres
         print(f">>> All agents successfully executed. Resolving {identifier} in Database.")
         subprocess.run(["psql", "-h", "localhost", "-p", "5433", "-U", "paperclip", "-d", "paperclip", "-c", f"UPDATE issues SET status = 'done', completed_at = NOW() WHERE identifier = '{identifier}';"], env=env)
         
-        sys.exit(0)
+        return True
         
     except Exception as e:
         print(f"Bridge execution failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        return False
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent_id", help="Overriding agent ID")
+    parser.add_argument("--issue_id", help="Specific issue identifier")
+    args = parser.parse_args()
+    
+    success = run_bridge(agent_id=args.agent_id, identifier=args.issue_id)
+    sys.exit(0 if success else 1)

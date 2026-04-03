@@ -150,11 +150,9 @@ To guarantee absolute security, avoid ever logging passwords natively into termi
 **Everything is driven entirely by a single `.env` file!**
 
 ### 5.1 Push Tokens from Your Local Machine
-From your **Local Development Machine** (Mac, Linux, or Windows WSL—NOT the EC2/RunPod Server), explicitly run the synchronization script built into the repository to securely ferry your active tokens natively over Rsync into the remote cluster:
+From your **Local Development Machine** (within the `backend-logic/` directory), explicitly run the synchronization script:
 ```bash
-# On your Local Machine inside the Zero-Human-MVP directory:
-# Ensure your .env file is populated with GITHUB_TOKEN and OPENAI_API_KEY
-./scripts/sync_to_runpod.sh
+./scripts/sync_to_remote.sh --watch
 ```
 
 ### 5.2 Validate the Configuration Natively

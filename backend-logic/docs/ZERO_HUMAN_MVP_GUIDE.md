@@ -21,7 +21,7 @@ Paperclip acts as the Management Dashboard. It runs natively on Node.js/Next.js 
 ### B. The Python Execution Bridge 
 Because Paperclip was natively designed to route tasks to Anthropic formats, we built a Python adapter (`openclaw_bridge.py`) that acts as the "Interpreter."
 * The script catches the Issue String from the Paperclip Database.
-* It securely injects your OpenAI API (`sk-proj-REDACTED...`) and your GitHub Token directly into the local environment.
+* It securely injects your OpenAI API (`sk-proj-...`) and your GitHub Token directly into the local environment.
 * It forcefully triggers the `openclaw` execution engine locally on the server.
 
 ### C. The Physical Execution Engine (OpenClaw)

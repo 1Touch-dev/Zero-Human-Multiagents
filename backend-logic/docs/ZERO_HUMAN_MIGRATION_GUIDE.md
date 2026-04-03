@@ -55,8 +55,9 @@ Before shifting the code, you must update your local `.env` file to point to the
 ## 4. Code & Database Migration
 
 ### Step 4.1: Sync Codebase to EC2
-From your **Local Development Machine** (Mac, Linux, or Windows WSL), run the synchronization utility. This will move all logic, bridges, and environment variables to the new server:
+From your **Local Development Machine** (Mac, Linux, or Windows WSL), run the sync utility:
 ```bash
+# From within backend-logic/
 ./scripts/sync_to_remote.sh
 ```
 
@@ -104,7 +105,20 @@ If you are using an AI coding assistant (like Cursor or Codex) to perform this m
 > 2.  Safely copy the entire `/home/paperclip/Zero-Human-MVP` directory from RunPod to the EC2 `/home/ubuntu/` directory. **CRITICAL**: Do NOT delete anything from the source (RunPod).
 > 3.  Maintain the file permissions and ownership.
 > 4.  Update the `.env` file on the new EC2 instance to reflect the new local paths if necessary.
-> 5.  Once the files are moved, navigate to `/home/ubuntu/Zero-Human-MVP` on the EC2 and run `./scripts/Shell_Execution/setup.sh` followed by `./scripts/Shell_Execution/restart_dashboard.sh`.
+> 5.  Once the files are moved, navigate to `/home/ubuntu/Zero-Human-MVP` on the EC2 and run:
+>
+> 1. **Setup Orchestrator (Dashboard):**
+>    ```bash
+>    cd orchestrator
+>    pnpm install
+>    pnpm dev
+>    ```
+>
+> 2. **Setup Backend (Bridges):**
+>    ```bash
+>    cd backend-logic
+>    ./scripts/Shell_Execution/setup.sh
+>    ```
 > 6.  Verify that the Paperclip dashboard is reachable at `http://<TARGET_IP>:3000`."
 
 ---

@@ -58,8 +58,8 @@ We rely completely on a statelessly injected **Environment File (`.env`)** to ma
 To effectively link the UI server and Agents remotely, you conditionally overwrite your tracked local `Zero-Human-MVP/.env` file with the exact target endpoints identical to this template profile:
 
 ```bash
-OPENAI_API_KEY="sk-proj-REDACTED"
-GITHUB_TOKEN="github_pat_REDACTED"
+OPENAI_API_KEY="sk-proj-YOUR_KEY"
+GITHUB_TOKEN="github_pat_YOUR_TOKEN"
 OPENCLAW_MODEL="openai/gpt-4o"  # Options include "openai/gpt-5.4", "anthropic/claude-3.5-sonnet", etc.
 ```
 

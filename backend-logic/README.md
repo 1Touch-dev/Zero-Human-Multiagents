@@ -23,8 +23,8 @@ To vastly simplify user operations, both your `OPENAI_API_KEY`, your `GITHUB_TOK
 
 1. Create or edit the `.env` file locally:
 ```bash
-OPENAI_API_KEY="sk-proj-REDACTED"
-GITHUB_TOKEN="github_pat_REDACTED"
+OPENAI_API_KEY="sk-proj-YOUR_KEY"
+GITHUB_TOKEN="github_pat_YOUR_TOKEN"
 OPENCLAW_MODEL="openai/gpt-4o"
 ```
 

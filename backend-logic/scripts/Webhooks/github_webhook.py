@@ -9,6 +9,15 @@ import uvicorn
 
 app = FastAPI(title="Zero-Human GitHub Webhook Server")
 
+# V2 Addition: Celery Task Dispatcher
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'Python_Bridges'))
+try:
+    from tasks import process_issue
+except ImportError:
+    print(">>> WARNING: Could not import Celery 'process_issue' task. Falling back to DB-only updates.")
+    process_issue = None
+
 GITHUB_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "default_secret")
 DB_DSN = os.environ.get("DATABASE_URL", "postgresql://paperclip:paperclip@localhost:5433/paperclip")
 
@@ -78,14 +87,22 @@ def process_issue_comment(event_data: dict):
             SET status = 'todo', 
                 description = %s,
                 updated_at = NOW()
-            WHERE identifier = %s;
+            WHERE identifier = %s
+            RETURNING assignee_agent_id;
         """, (new_desc, identifier))
+        
+        assignee_agent_id = cur.fetchone()[0]
         
         conn.commit()
         cur.close()
         conn.close()
         
         print(f"Successfully re-queued {identifier} for AI revision.")
+        
+        # V2: Async Dispatch to Celery
+        if process_issue:
+            print(f">>> Dispatching Celery task for {identifier} (Agent: {assignee_agent_id})")
+            process_issue.delay(assignee_agent_id, identifier)
         
     except Exception as e:
          print(f"Database error processing webhook: {e}")
