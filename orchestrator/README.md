@@ -188,6 +188,29 @@ pnpm dev
 
 This starts the API server at `http://localhost:3100`. An embedded PostgreSQL database is created automatically — no setup required.
 
+### Run Side-by-Side with Another URL
+
+If you already have a Paperclip instance on `:3000`, run this repo on a different port (default `:3101`) so both remain available:
+
+```bash
+cd orchestrator
+pnpm install
+./scripts/dev-side-by-side.sh
+```
+
+Then open:
+
+- `http://127.0.0.1:3101` (same machine)
+- `http://<server-ip>:3101` (from another device)
+
+The helper script automatically uses authenticated deployment mode so non-loopback host binding works safely.
+
+You can override the port at launch time:
+
+```bash
+PORT=3200 ./scripts/dev-side-by-side.sh
+```
+
 > **Requirements:** Node.js 20+, pnpm 9.15+
 
 <br/>
