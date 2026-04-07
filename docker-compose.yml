@@ -1,0 +1,29 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  backend-api:
+    build:
+      context: ./backend-api
+    container_name: zh-backend-api
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    ports:
+      - "8100:8100"
+    depends_on:
+      - redis
+    command: uvicorn main:app --host 0.0.0.0 --port 8100
+
+  celery-worker:
+    build:
+      context: ./backend-api
+    container_name: zh-celery-worker
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      - redis
+    command: celery -A celery_app.celery_app worker --loglevel=info
