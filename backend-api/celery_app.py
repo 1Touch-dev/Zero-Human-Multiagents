@@ -20,4 +20,23 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
+
+    # Results expire after 24 hours — prevents Redis memory growth.
+    result_expires=86400,
+
+    # Route lightweight vs heavy tasks to separate queues.
+    task_routes={
+        "lightweight_task": {"queue": "light"},
+        "execute_agent_task": {"queue": "heavy"},
+    },
+
+    # Default queue for unrouted tasks.
+    task_default_queue="heavy",
+
+    # Prefetch one task at a time per worker — prevents one worker hoarding tasks.
+    worker_prefetch_multiplier=1,
+
+    # Acknowledge task only after it completes, not when received.
+    # Ensures failed tasks are re-queued on worker crash.
+    task_acks_late=True,
 )

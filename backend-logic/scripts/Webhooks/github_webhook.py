@@ -106,8 +106,14 @@ def fallback_requeue_in_db(identifier: str, author: str, comment_body: str):
 
 def process_issue_comment(event_data: dict):
     """
-    Parses GitHub issue comment payloads, matching the issue title to a Paperclip Ticket (e.g. [PAP-14]),
-    and appends the human feedback directly to the Paperclip Postgres database to awaken the AI agents.
+    API-FIRST dispatch: All task routing goes through the Backend API.
+    DB fallback is EMERGENCY ONLY — used only when API is unreachable.
+
+    Flow:
+      1. Parse and validate the GitHub event.
+      2. POST to Backend API /task (primary path — always try this first).
+      3. If API is unreachable, fall back to direct DB requeue (emergency only).
+      4. Log which path was used so it is visible in monitoring.
     """
     # Only process newly created comments
     if event_data.get("action") != "created":
@@ -115,32 +121,39 @@ def process_issue_comment(event_data: dict):
 
     comment_body = event_data.get("comment", {}).get("body", "")
     author = event_data.get("sender", {}).get("login", "")
-    
-    # We only care about humans commenting; ignore AI bot comments
+
+    # Ignore AI bot comments
     if "[BOT]" in author.upper() or author == "zero-human-ai":
         return
 
     issue_data = event_data.get("issue", {})
-    # For pull_request_review_comment events, it's under 'pull_request'
     if not issue_data:
         issue_data = event_data.get("pull_request", {})
 
     issue_title = issue_data.get("title", "")
-    
-    # The Paperclip orchestration creates PRs with titles like "[PAP-14] Add Login Features"
+
     match = re.search(r'\[(PAP-\d+)\]', issue_title)
     if not match:
         print(f"Ignored: Could not extract PAP identifier from title: '{issue_title}'")
         return
 
     identifier = match.group(1)
-    print(f"Received feedback for {identifier} from @{author}")
+    print(f"[WEBHOOK] Received feedback for {identifier} from @{author}")
+
+    # --- PRIMARY PATH: Backend API ---
     enqueued, result = enqueue_task_via_backend_api(identifier, author, comment_body, event_data)
     if enqueued:
-        print(f"Enqueued {identifier} via backend API. task_id={result}")
+        print(f"[WEBHOOK] [PRIMARY] Enqueued {identifier} via Backend API. task_id={result}")
         return
 
-    print(f"Backend API enqueue failed for {identifier}: {result}. Falling back to DB re-queue.")
+    # --- EMERGENCY FALLBACK: Direct DB requeue ---
+    # This path is only reached if Backend API is completely unreachable.
+    # Alert clearly in logs so the team knows this happened.
+    print(
+        f"[WEBHOOK] [EMERGENCY-FALLBACK] Backend API unreachable for {identifier}. "
+        f"Reason: {result}. "
+        f"Using direct DB requeue. Check that zerohuman-backend-api service is running."
+    )
     fallback_requeue_in_db(identifier, author, comment_body)
 
 @app.post("/webhook")
