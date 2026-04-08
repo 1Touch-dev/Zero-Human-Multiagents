@@ -159,6 +159,9 @@ def orchestrate_task(task: dict[str, Any]) -> list[str]:
 
     Tries LLM-based planning first; falls back to rule-based on any failure.
     Always returns a non-empty list of valid role keys.
+
+    Emits a structured log line in this format for auditability:
+      ORCHESTRATOR_PLAN identifier=<id> planner_mode=<llm|fallback> plan=<list>
     """
     identifier = task.get("identifier", "unknown")
 
@@ -167,13 +170,13 @@ def orchestrate_task(task: dict[str, Any]) -> list[str]:
     if llm_raw is not None:
         plan = _validate_llm_plan(llm_raw)
         if plan:
-            print(f">>> Orchestrator [LLM] plan for {identifier}: {plan}")
+            print(f"ORCHESTRATOR_PLAN identifier={identifier} planner_mode=llm plan={plan}")
             return plan
         print(f">>> Orchestrator [LLM] returned invalid plan for {identifier}. Using rule-based fallback.")
 
     # --- Rule-based fallback ---
     plan = _rule_based_plan(task)
-    print(f">>> Orchestrator [rule-based] plan for {identifier}: {plan}")
+    print(f"ORCHESTRATOR_PLAN identifier={identifier} planner_mode=fallback plan={plan}")
     return plan
 
 

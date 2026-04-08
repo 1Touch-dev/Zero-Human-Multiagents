@@ -63,10 +63,16 @@ except Exception:  # noqa: BLE001 - keep bridge resilient if github automation i
     create_pr_from_repo = None
 
 try:
-    from tools.s3_storage import build_log_key, is_enabled as s3_enabled, upload_text
+    from tools.s3_storage import (
+        build_log_key,
+        is_enabled as s3_enabled,
+        sweep_sandbox_output,
+        upload_text,
+    )
 except Exception:  # noqa: BLE001 - keep bridge resilient if s3 layer is unavailable
     build_log_key = None
     s3_enabled = None
+    sweep_sandbox_output = None
     upload_text = None
 
 try:
@@ -422,6 +428,24 @@ def main():
         }
         selected_skill = get_skill(role_key, task=task_context, model=target_model)
         print(f">>> Using skill for {role_name}: {selected_skill.name}")
+
+        # --- H1: Wire Skill.execute() as runtime preparation step ---
+        # Skill.execute() runs preparatory checks (repo scan, sandbox check, lint, git log)
+        # and returns a structured JSON context used to enrich the role prompt.
+        skill_context: dict = {}
+        if hasattr(selected_skill, "execute"):
+            try:
+                skill_context = selected_skill.execute(
+                    role_key=role_key,
+                    task=task_context,
+                    identifier=identifier,
+                    sandbox_dir="/tmp/zero-human-sandbox",
+                    run_id=run_id,
+                )
+                print(f">>> Skill.execute() output for {role_key}: status={skill_context.get('status')} phase={skill_context.get('output', {}).get('phase', 'n/a')}")
+            except Exception as skill_exec_err:  # noqa: BLE001 - never block on skill execute failure
+                print(f">>> Skill.execute() failed for {role_key} (non-fatal): {skill_exec_err}", file=sys.stderr)
+
         structured_log_path = None
         if write_event:
             structured_log_path = write_event(
@@ -484,13 +508,22 @@ def main():
             github_mode,
         )
         print(f">>> Running {role_name} phase for {identifier} ...")
-        result = subprocess.run(
-            ["/usr/bin/openclaw", "agent", "--agent", "main", "-m", message],
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        # --- H3: Route main OpenClaw call through tool layer when available ---
+        if run_bash:
+            result = run_bash(
+                ["/usr/bin/openclaw", "agent", "--agent", "main", "-m", message],
+                env=env,
+                check=False,
+                capture_output=True,
+            )
+        else:
+            result = subprocess.run(
+                ["/usr/bin/openclaw", "agent", "--agent", "main", "-m", message],
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
         if result.stdout:
             print(result.stdout)
         if result.stderr:
@@ -600,6 +633,30 @@ def main():
                     duration_ms=duration_ms,
                     metadata={"return_code": result.returncode},
                 )
+
+            # --- H2: Sweep sandbox for large files and offload to S3 after role success ---
+            # Files >= 1MB are uploaded to S3 and deleted locally to prevent EC2 disk buildup.
+            if sweep_sandbox_output:
+                try:
+                    offloaded_uris = sweep_sandbox_output(
+                        "/tmp/zero-human-sandbox",
+                        identifier=identifier,
+                        run_id=run_id,
+                        delete_after_upload=True,
+                    )
+                    if offloaded_uris:
+                        print(f">>> S3 sweep offloaded {len(offloaded_uris)} large file(s) for {identifier}: {offloaded_uris}")
+                        if write_event:
+                            write_event(
+                                event_type="sandbox_swept",
+                                identifier=identifier,
+                                role_key=role_key,
+                                skill_name=selected_skill.name,
+                                run_id=run_id,
+                                payload={"offloaded_uris": offloaded_uris},
+                            )
+                except Exception as sweep_err:  # noqa: BLE001 - never block on sweep failure
+                    print(f">>> S3 sweep failed for {identifier} (non-fatal): {sweep_err}", file=sys.stderr)
 
         if is_scribe:
             combined_output = f"{result.stdout or ''}\n{result.stderr or ''}"
