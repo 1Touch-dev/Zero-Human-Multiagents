@@ -227,6 +227,8 @@ def resolve_role_agents(api_base, api_key, run_id, company_id, env, planned_role
 
 
 def build_role_prompt(role_key, role_name, identifier, title, description, skill_prompt, github_mode):
+    repo_url = os.environ.get("ZERO_HUMAN_WORKSPACE_REPO_URL", "").strip()
+    base_branch = os.environ.get("ZERO_HUMAN_PR_BASE_BRANCH", "main").strip() or "main"
     delivery_guard = (
         "CRITICAL DELIVERY OWNERSHIP RULES:\n"
         "- ONLY The Scribe may push branches or create pull requests.\n"
@@ -241,9 +243,17 @@ def build_role_prompt(role_key, role_name, identifier, title, description, skill
     )
     if github_mode == "tool_first":
         scribe_directive = (
-            "ROLE DIRECTIVE (SCRIBE): finalize documentation/changelog and release notes only. "
-            "Do NOT run `gh pr create` in this mode; PR creation is handled by tool automation. "
-            "Return a concise final handoff summary for automated PR creation."
+            "ROLE DIRECTIVE (SCRIBE - TOOL_FIRST MODE): "
+            "You are responsible for BOTH implementation AND preparation for automated PR creation. "
+            "Follow these steps strictly in order:\n"
+            f"1. Inspect /tmp/zero-human-sandbox/ (cloned from {repo_url or 'the workspace repo'}).\n"
+            f"2. If the requested feature is NOT yet implemented, implement it fully now.\n"
+            f"3. Create a new branch named after the ticket identifier (e.g. {identifier.lower()}-feature).\n"
+            "4. Run: git add . && git commit -m 'feat: <short description of change>'\n"
+            "5. Do NOT run gh pr create or git push — PR creation and push are handled by automation.\n"
+            "6. Print explicit terminal logs of every file you changed and every git command you ran.\n"
+            "7. End with a one-line summary: SCRIBE_DONE: <branch-name> ready for automated PR to "
+            f"{base_branch}."
         )
 
     role_specific = {
@@ -340,6 +350,8 @@ def main():
         env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
         if os.environ.get("GITHUB_TOKEN", "").strip():
             env["GITHUB_TOKEN"] = os.environ["GITHUB_TOKEN"]
+        if os.environ.get("GH_TOKEN", "").strip():
+            env["GH_TOKEN"] = os.environ["GH_TOKEN"]
 
         agent_id = os.environ.get("PAPERCLIP_AGENT_ID", "").strip()
         api_url = os.environ.get("PAPERCLIP_API_URL", "").rstrip("/")
@@ -421,11 +433,14 @@ def main():
         # Enforce single PR owner by role: only Scribe receives GitHub token.
         if not is_scribe:
             env.pop("GITHUB_TOKEN", None)
+            env.pop("GH_TOKEN", None)
 
         target_model = os.environ.get("OPENCLAW_MODEL", "openai/gpt-4o")
-        github_mode = os.environ.get("ZERO_HUMAN_GITHUB_MODE", "legacy_first").strip().lower()
+        # Default to tool_first so PRs are created by controlled automation,
+        # not by free-form agent gh behavior that may target upstream forks.
+        github_mode = os.environ.get("ZERO_HUMAN_GITHUB_MODE", "tool_first").strip().lower()
         if github_mode not in {"legacy_first", "tool_first"}:
-            github_mode = "legacy_first"
+            github_mode = "tool_first"
         print(f">>> GitHub automation mode: {github_mode}")
         task_context = {
             "id": issue_id,
@@ -679,7 +694,12 @@ def main():
 
         if is_scribe:
             combined_output = f"{result.stdout or ''}\n{result.stderr or ''}"
-            pr_url = extract_pr_url(combined_output) or extract_pr_url_from_openclaw_sessions()
+            # In tool_first mode, ignore PR URLs emitted by Scribe and always route
+            # PR creation through deterministic tool automation.
+            if github_mode == "tool_first":
+                pr_url = None
+            else:
+                pr_url = extract_pr_url(combined_output) or extract_pr_url_from_openclaw_sessions()
             auto_pr_enabled = os.environ.get("ZERO_HUMAN_AUTO_PR_FALLBACK", "1").strip().lower() not in {
                 "0",
                 "false",

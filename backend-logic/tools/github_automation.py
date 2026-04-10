@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
+import time
 from pathlib import Path
 
 from .executor import run_bash
@@ -66,6 +66,33 @@ def _git(args: list[str], *, repo_path: str, check: bool = True):
     return run_bash(["git", *args], cwd=repo_path, check=check, capture_output=True)
 
 
+def _has_uncommitted_changes(repo_path: str) -> bool:
+    result = _git(["status", "--porcelain"], repo_path=repo_path, check=False)
+    return bool((result.stdout or "").strip())
+
+
+def _safe_auto_commit(repo_path: str, message: str) -> bool:
+    add_result = _git(["add", "."], repo_path=repo_path, check=False)
+    if add_result.returncode != 0:
+        return False
+    commit_result = run_bash(
+        [
+            "git",
+            "-c",
+            "user.name=Zero Human Scribe",
+            "-c",
+            "user.email=zero-human-scribe@local",
+            "commit",
+            "-m",
+            message,
+        ],
+        cwd=repo_path,
+        check=False,
+        capture_output=True,
+    )
+    return commit_result.returncode == 0
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -113,10 +140,13 @@ def create_pr(
     title: str,
     body: str,
     *,
+    repo_target: str | None = None,
     base_branch: str | None = None,
     head_branch: str | None = None,
 ) -> str:
     cmd = ["gh", "pr", "create", "--title", title, "--body", body]
+    if repo_target:
+        cmd.extend(["--repo", repo_target])
     if base_branch:
         cmd.extend(["--base", base_branch])
     if head_branch:
@@ -147,8 +177,7 @@ def create_pr_from_repo(
     token = _token()
     if not token:
         raise RuntimeError(
-            "No GitHub token found. Set GH_TOKEN or GITHUB_TOKEN in "
-            "/home/ubuntu/Zero-Human-Multiagents-Dev/backend-logic/.env"
+            "No GitHub token found. Set GH_TOKEN or GITHUB_TOKEN in your backend-logic/.env file."
         )
 
     branch = current_branch(repo_path)
@@ -157,28 +186,40 @@ def create_pr_from_repo(
 
     base = (base_branch or "main").strip()
 
+    # Never try to open a PR from main/master directly.
+    if branch in {"main", "master"}:
+        generated_branch = f"zero-human/{int(time.time())}"
+        checkout_result = _git(["checkout", "-B", generated_branch], repo_path=repo_path, check=False)
+        if checkout_result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to create working branch '{generated_branch}' from '{branch}': "
+                f"{(checkout_result.stderr or '').strip()}"
+            )
+        branch = generated_branch
+
+    # If Scribe produced file edits but forgot to commit, commit them automatically.
+    if _has_uncommitted_changes(repo_path):
+        committed = _safe_auto_commit(repo_path, "chore: prepare automated scribe PR")
+        if not committed:
+            raise RuntimeError(
+                "Detected uncommitted changes but failed to create an automated commit for PR fallback."
+            )
+
     # Validate there are commits to PR (avoid opaque gh GraphQL failures).
     _git(["fetch", "--all"], repo_path=repo_path, check=False)
-    diff_check = _git(
-        ["rev-list", "--count", f"--not", "--remotes", branch],
-        repo_path=repo_path,
-        check=False,
-    )
-    ahead_count = int((diff_check.stdout or "0").strip() or "0")
+    ahead_count = 0
+    for remote_base in (f"origin/{base}", f"fork/{base}"):
+        rev_count = _git(["rev-list", "--count", f"{remote_base}..HEAD"], repo_path=repo_path, check=False)
+        if rev_count.returncode == 0:
+            try:
+                ahead_count = max(ahead_count, int((rev_count.stdout or "0").strip() or "0"))
+            except ValueError:
+                pass
     if ahead_count <= 0:
-        # Fallback: compare against base on any remote
-        diff_check2 = run_bash(
-            ["git", "log", "--oneline", f"HEAD", f"--not", f"origin/{base}", f"--not", f"fork/{base}"],
-            cwd=repo_path,
-            check=False,
-            capture_output=True,
+        raise RuntimeError(
+            f"No commits to PR on branch '{branch}'. "
+            "Ensure the Scribe phase commits feature changes."
         )
-        has_commits = bool((diff_check2.stdout or "").strip())
-        if not has_commits:
-            raise RuntimeError(
-                f"No commits to PR on branch '{branch}'. "
-                "Ensure the Scribe phase commits feature changes."
-            )
 
     # Discover all remotes and attempt push using token-authenticated URL.
     remotes = _list_remotes(repo_path)
@@ -212,21 +253,23 @@ def create_pr_from_repo(
             + "\n".join(push_errors)
         )
 
-    # Determine PR head — if pushed to the same repo as origin, use bare branch name.
-    # If a different fork repo, use owner:branch cross-repo format.
+    # Determine PR head and target repo dynamically from where push succeeded.
+    # This prevents gh from auto-targeting an upstream parent repo.
     origin_url = _remote_url(repo_path, "origin") if "origin" in remotes else ""
     origin_owner, _ = _extract_owner_repo(origin_url)
-    pushed_owner, _ = _extract_owner_repo(pushed_url)
+    pushed_owner, pushed_repo = _extract_owner_repo(pushed_url)
 
     if pushed_owner and origin_owner and pushed_owner.lower() != origin_owner.lower():
         head_for_pr = f"{pushed_owner}:{branch}"
     else:
         head_for_pr = branch
+    repo_target = f"{pushed_owner}/{pushed_repo}" if pushed_owner and pushed_repo else None
 
     return create_pr(
         repo_path,
         title=title,
         body=body,
+        repo_target=repo_target,
         base_branch=base,
         head_branch=head_for_pr,
     )
