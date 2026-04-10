@@ -13,7 +13,7 @@ import uvicorn
 app = FastAPI(title="Zero-Human GitHub Webhook Server")
 
 GITHUB_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "default_secret")
-DB_DSN = os.environ.get("DATABASE_URL", "postgresql://paperclip:paperclip@localhost:5433/paperclip")
+DB_DSN = os.environ.get("DATABASE_URL", "postgresql://paperclip:paperclip@localhost:5432/paperclip")
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8100").rstrip("/")
 
 def verify_signature(payload: bytes, signature_header: str):

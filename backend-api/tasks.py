@@ -5,6 +5,10 @@ Celery task definitions — two task types:
 """
 import time
 from typing import Any
+import os
+import sys
+import contextlib
+import io
 
 from celery.utils.log import get_task_logger
 
@@ -12,8 +16,42 @@ from celery_app import celery_app
 
 logger = get_task_logger(__name__)
 
+def run_issue(issue_id: str, repo_url: str | None = None, paperclip_context: dict[str, str] | None = None) -> dict[str, Any]:
+    """
+    Programmatic entry point for the cascade bridge, intended for use by Celery workers.
+    Sets up the environment and executes the main cascade logic.
+    """
+    if paperclip_context:
+        for k, v in paperclip_context.items():
+            os.environ[k] = str(v)
+
+    # If repo_url is provided, ensure it's in env for tools to use
+    if repo_url:
+        os.environ["ZERO_HUMAN_WORKSPACE_REPO_URL"] = repo_url
+
+    # The original script relies on environment variables set by the heartbeat.
+    # We maintain this behavior for compatibility but can wrap the logic here.
+    try:
+        # We call main() which will pull from the environment we just set/verified
+        # Use a sub-process or direct call? Direct call is faster but needs env management.
+        # Since main() ends with sys.exit(0), we need to handle that.
+        from openclaw_bridge_cascade import main
+
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+            try:
+                main()
+            except SystemExit as e:
+                if e.code != 0:
+                    return {"ok": False, "error": f"Cascade exited with code {e.code}", "logs": f.getvalue()}
+
+        return {"ok": True, "logs": f.getvalue()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # Maximum seconds a heavy agent task is allowed to run before timeout.
-AGENT_TASK_TIMEOUT_SECONDS = 600  # 10 minutes
+AGENT_TASK_TIMEOUT_SECONDS = 3600  # 60 minutes — full 4-agent cascade needs up to 40 min
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +104,19 @@ def lightweight_task(self, payload: dict[str, Any]) -> dict[str, Any]:
 def execute_agent_task(self, payload: dict[str, Any]) -> dict[str, Any]:
     """
     Full agent pipeline execution task.
-
-    - Retries up to 3 times with 30-second delay.
-    - Soft timeout at 10 minutes (raises SoftTimeLimitExceeded — task can clean up).
-    - Hard timeout at 11 minutes (process killed).
-    - Distinguishes transient failures (retry) from permanent errors (fail fast).
+    Wires into the real openclaw_bridge_cascade.
     """
+    import sys
+    import os
+
+    # Ensure backend-logic is in path for imports
+    logic_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend-logic"))
+    bridge_path = os.path.join(logic_root, "scripts", "Python_Bridges")
+    if bridge_path not in sys.path:
+        sys.path.insert(0, bridge_path)
+
+    from openclaw_bridge_cascade import run_issue
+
     started_at = int(time.time())
     issue_id = payload.get("issue_id", "unknown")
     repo_url = payload.get("repo_url", "")
@@ -83,10 +128,32 @@ def execute_agent_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         issue_id, repo_url, user_id, attempt, self.max_retries + 1,
     )
 
+    # NOTE: We intentionally do NOT reset the assignee_agent_id here.
+    # The cascade bridge reads the CURRENT assignee from the DB and runs that
+    # agent's phase. Resetting to Architect on every call broke the relay chain.
+
+    # Inject the correct PAPERCLIP_AGENT_ID from payload so the bridge runs
+    # as the right agent (Architect / Grunt / Pedant / Scribe).
+    agent_id = payload.get("agent_id", "").strip()
+    if agent_id:
+        os.environ["PAPERCLIP_AGENT_ID"] = agent_id
+        logger.info("Running cascade as agent_id=%s for issue_id=%s", agent_id, issue_id)
+
     try:
-        # Placeholder for real pipeline invocation.
-        # Replace `time.sleep(2)` with actual cascade/orchestrator call when ready.
-        time.sleep(2)
+        # Execute the real cascade
+        # We pass the payload metadata which may contain Paperclip context
+        result_data = run_issue(
+            issue_id=issue_id,
+            repo_url=repo_url,
+            paperclip_context=payload.get("metadata", {})
+        )
+
+        logs_output = result_data.get("logs", "")
+        if "No assigned issue" in logs_output:
+            raise RuntimeError("Cascade bypassed execution: No assigned issue found in DB for this agent.")
+
+        if not result_data.get("ok"):
+            raise RuntimeError(result_data.get("error", "Unknown cascade error"))
 
         result = {
             "ok": True,
@@ -98,6 +165,7 @@ def execute_agent_task(self, payload: dict[str, Any]) -> dict[str, Any]:
             "attempt": attempt,
             "started_at": started_at,
             "completed_at": int(time.time()),
+            "logs_summary": result_data.get("logs", "")[-1000:]
         }
         logger.info("Agent task completed: issue_id=%s attempt=%d", issue_id, attempt)
         return result
@@ -108,14 +176,9 @@ def execute_agent_task(self, payload: dict[str, Any]) -> dict[str, Any]:
             "Agent task failed: issue_id=%s attempt=%d elapsed=%ds error=%s",
             issue_id, attempt, elapsed, exc,
         )
-        # Retry on transient errors; give up on permanent failures.
         if attempt <= self.max_retries:
-            raise self.retry(exc=exc, countdown=30 * attempt)  # backoff: 30s, 60s, 90s
+            raise self.retry(exc=exc, countdown=30 * attempt)
 
-        logger.error(
-            "Agent task permanently failed after %d attempts: issue_id=%s error=%s",
-            attempt, issue_id, exc,
-        )
         return {
             "ok": False,
             "task_type": "agent",
