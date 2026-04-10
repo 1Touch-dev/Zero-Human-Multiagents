@@ -222,6 +222,8 @@ def create_pr_from_repo(
         )
 
     # Discover all remotes and attempt push using token-authenticated URL.
+    # Also try ZERO_HUMAN_WORKSPACE_REPO_URL directly so PR automation works
+    # even when local remote config points at a non-writable upstream.
     remotes = _list_remotes(repo_path)
     if not remotes:
         raise RuntimeError(f"No git remotes configured in {repo_path}")
@@ -229,11 +231,26 @@ def create_pr_from_repo(
     push_errors: list[str] = []
     pushed_remote: str | None = None
     pushed_url: str | None = None
-
+    push_candidates: list[tuple[str, str]] = []
     for remote in remotes:
         raw_url = _remote_url(repo_path, remote)
-        if not raw_url or "github.com" not in raw_url:
+        if raw_url and "github.com" in raw_url:
+            push_candidates.append((remote, raw_url))
+
+    workspace_repo_url = os.environ.get("ZERO_HUMAN_WORKSPACE_REPO_URL", "").strip()
+    if workspace_repo_url and "github.com" in workspace_repo_url:
+        push_candidates.append(("workspace_repo_url", workspace_repo_url))
+
+    seen_urls: set[str] = set()
+    unique_candidates: list[tuple[str, str]] = []
+    for source_name, raw_url in push_candidates:
+        normalized = raw_url.rstrip("/")
+        if normalized in seen_urls:
             continue
+        seen_urls.add(normalized)
+        unique_candidates.append((source_name, raw_url))
+
+    for source_name, raw_url in unique_candidates:
         authed_url = _inject_token(raw_url, token)
         result = run_bash(
             ["git", "push", "-u", authed_url, f"{branch}:{branch}"],
@@ -242,10 +259,10 @@ def create_pr_from_repo(
             capture_output=True,
         )
         if result.returncode == 0:
-            pushed_remote = remote
+            pushed_remote = source_name
             pushed_url = raw_url
             break
-        push_errors.append(f"[{remote}] {(result.stderr or '').strip()}")
+        push_errors.append(f"[{source_name}] {(result.stderr or '').strip()}")
 
     if not pushed_remote or not pushed_url:
         raise RuntimeError(
