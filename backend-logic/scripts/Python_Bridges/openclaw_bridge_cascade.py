@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
 
 BACKEND_LOGIC_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 if BACKEND_LOGIC_ROOT not in sys.path:
@@ -58,8 +59,9 @@ except Exception:  # noqa: BLE001 - keep bridge resilient if tools module is una
     run_bash = None
 
 try:
-    from tools.github_automation import create_pr_from_repo
+    from tools.github_automation import clone_repo, create_pr_from_repo
 except Exception:  # noqa: BLE001 - keep bridge resilient if github automation is unavailable
+    clone_repo = None
     create_pr_from_repo = None
 
 try:
@@ -103,7 +105,12 @@ def load_env():
             for line in f:
                 if "=" in line and not line.strip().startswith("#"):
                     k, v = line.strip().split("=", 1)
-                    os.environ[k.strip()] = v.strip().strip('"').strip("'")
+                    k = k.strip()
+                    # Do NOT overwrite vars already set in the environment.
+                    # This allows PAPERCLIP_AGENT_ID injected by the Celery task
+                    # to take precedence over the .env default (Architect's ID).
+                    if k not in os.environ:
+                        os.environ[k] = v.strip().strip('"').strip("'")
 
 
 def api_request(method, url, api_key, run_id, payload=None):
@@ -489,14 +496,26 @@ def main():
             )
         if run_bash:
             run_bash(["/usr/bin/openclaw", "models", "set", target_model], env=env, check=False)
-            run_bash("rm -rf /tmp/zero-human-sandbox/*", check=False)
+            # Full removal including .git so each run starts from a clean slate.
+            # "rm -rf /tmp/zero-human-sandbox/*" misses hidden dirs (.git) and
+            # leaves stale branch state that causes wrong head branch on PR creation.
+            run_bash("rm -rf /tmp/zero-human-sandbox && mkdir -p /tmp/zero-human-sandbox", check=False)
         else:
             subprocess.run(["/usr/bin/openclaw", "models", "set", target_model], env=env, check=False)
-            subprocess.run("rm -rf /tmp/zero-human-sandbox/*", shell=True, check=False)
+            subprocess.run(
+                "rm -rf /tmp/zero-human-sandbox && mkdir -p /tmp/zero-human-sandbox",
+                shell=True,
+                check=False,
+            )
         if ensure_dir:
             ensure_dir("/tmp/zero-human-sandbox")
         else:
             subprocess.run(["mkdir", "-p", "/tmp/zero-human-sandbox"], check=False)
+
+        repo_url = os.environ.get("ZERO_HUMAN_WORKSPACE_REPO_URL")
+        if repo_url and clone_repo:
+            print(f">>> Auto-initializing sandbox from {repo_url}...")
+            clone_repo(repo_url, "/tmp/zero-human-sandbox")
 
         message = build_role_prompt(
             role_key,
@@ -778,6 +797,42 @@ def main():
     except Exception as e:
         print(f"Bridge execution failed: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def run_issue(issue_id: str, repo_url: str | None = None, paperclip_context: dict[str, str] | None = None) -> dict[str, Any]:
+    """
+    Programmatic entry point for the cascade bridge, intended for use by Celery workers.
+    Sets up the environment and executes the main cascade logic.
+    """
+    import os
+    from typing import Any
+
+    if paperclip_context:
+        for k, v in paperclip_context.items():
+            os.environ[k] = str(v)
+
+    # If repo_url is provided, ensure it's in env for tools to use
+    if repo_url:
+        os.environ["ZERO_HUMAN_WORKSPACE_REPO_URL"] = repo_url
+
+    # The original script relies on environment variables set by the heartbeat.
+    # We maintain this behavior for compatibility but can wrap the logic here.
+    try:
+        # Since main() ends with sys.exit(0), we need to handle that.
+        import contextlib
+        import io
+
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+            try:
+                main()
+            except SystemExit as e:
+                if e.code != 0:
+                    return {"ok": False, "error": f"Cascade exited with code {e.code}", "logs": f.getvalue()}
+
+        return {"ok": True, "logs": f.getvalue()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 if __name__ == "__main__":
