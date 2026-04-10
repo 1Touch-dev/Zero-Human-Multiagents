@@ -205,10 +205,19 @@ def create_pr_from_repo(
                 "Detected uncommitted changes but failed to create an automated commit for PR fallback."
             )
 
+    # Discover all remotes and attempt push using token-authenticated URL.
+    # Also try ZERO_HUMAN_WORKSPACE_REPO_URL directly so PR automation works
+    # even when local remote config points at a non-writable upstream.
+    remotes = _list_remotes(repo_path)
+    if not remotes:
+        raise RuntimeError(f"No git remotes configured in {repo_path}")
+
     # Validate there are commits to PR (avoid opaque gh GraphQL failures).
+    # This is dynamic across whatever remotes exist; no hardcoded remote names.
     _git(["fetch", "--all"], repo_path=repo_path, check=False)
     ahead_count = 0
-    for remote_base in (f"origin/{base}", f"fork/{base}"):
+    for remote_name in remotes:
+        remote_base = f"{remote_name}/{base}"
         rev_count = _git(["rev-list", "--count", f"{remote_base}..HEAD"], repo_path=repo_path, check=False)
         if rev_count.returncode == 0:
             try:
@@ -220,13 +229,6 @@ def create_pr_from_repo(
             f"No commits to PR on branch '{branch}'. "
             "Ensure the Scribe phase commits feature changes."
         )
-
-    # Discover all remotes and attempt push using token-authenticated URL.
-    # Also try ZERO_HUMAN_WORKSPACE_REPO_URL directly so PR automation works
-    # even when local remote config points at a non-writable upstream.
-    remotes = _list_remotes(repo_path)
-    if not remotes:
-        raise RuntimeError(f"No git remotes configured in {repo_path}")
 
     push_errors: list[str] = []
     pushed_remote: str | None = None
