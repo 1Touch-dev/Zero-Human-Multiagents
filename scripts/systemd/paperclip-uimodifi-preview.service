@@ -1,0 +1,21 @@
+[Unit]
+Description=Paperclip PaperclipUimodifi branch preview (API on 127.0.0.1:3302, same DB as dev)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Zero-Human-Multiagents-Dev-worktrees/paperclipuimodifi/orchestrator
+EnvironmentFile=/home/ubuntu/Zero-Human-Multiagents-Dev-worktrees/paperclipuimodifi/orchestrator/server/.env.paperclipuimodifi-preview
+Environment=PORT=3302
+Environment=HOST=127.0.0.1
+Environment=PAPERCLIP_OPEN_ON_LISTEN=false
+Environment=PAPERCLIP_DEPLOYMENT_MODE=local_trusted
+Environment=PAPERCLIP_INSTANCE_ID=uimodifi-preview
+ExecStartPre=/home/ubuntu/Zero-Human-Multiagents-Dev-worktrees/paperclipuimodifi/scripts/ensure-branch-paperclipuimodifi.sh
+ExecStart=/usr/bin/bash -lc 'pnpm dev:once -- --local-trusted'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

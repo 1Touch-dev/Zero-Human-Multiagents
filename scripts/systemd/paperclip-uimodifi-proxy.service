@@ -1,0 +1,15 @@
+[Unit]
+Description=Paperclip PaperclipUimodifi preview proxy (public :3301 to 127.0.0.1:3302)
+After=network.target paperclip-uimodifi-preview.service
+
+[Service]
+User=ubuntu
+ExecStart=/usr/bin/socat TCP4-LISTEN:3301,fork,reuseaddr TCP4:127.0.0.1:3302
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paperclip-uimodifi-proxy
+
+[Install]
+WantedBy=multi-user.target
