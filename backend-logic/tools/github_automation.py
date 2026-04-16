@@ -115,9 +115,14 @@ def clone_repo(repo_url: str, workspace_dir: str) -> str:
 
 def create_branch(repo_path: str, branch_name: str, base_branch: str | None = None) -> None:
     if base_branch:
-        _git(["fetch", "--all"], repo_path=repo_path, check=False)
-        _git(["checkout", base_branch], repo_path=repo_path, check=True)
-        _git(["pull"], repo_path=repo_path, check=False)
+        remotes = _list_remotes(repo_path)
+        preferred_remote = "origin" if "origin" in remotes else (remotes[0] if remotes else "")
+        base_ref = base_branch
+        if preferred_remote:
+            fetch_result = _git(["fetch", preferred_remote, base_branch], repo_path=repo_path, check=False)
+            if fetch_result.returncode == 0:
+                base_ref = f"{preferred_remote}/{base_branch}"
+        _git(["checkout", "-B", base_branch, base_ref], repo_path=repo_path, check=True)
     _git(["checkout", "-B", branch_name], repo_path=repo_path, check=True)
 
 
@@ -133,6 +138,60 @@ def push_branch(repo_path: str, branch_name: str, remote: str = "origin") -> Non
 def current_branch(repo_path: str) -> str:
     result = _git(["rev-parse", "--abbrev-ref", "HEAD"], repo_path=repo_path, check=True)
     return (result.stdout or "").strip()
+
+
+def _gh_env() -> dict[str, str]:
+    """Return an env dict for gh CLI calls that includes the GitHub token.
+
+    gh CLI reads GH_TOKEN (preferred) or GITHUB_TOKEN automatically, but we
+    pass them explicitly so the env is correct regardless of how run_bash
+    inherits the process environment.
+    """
+    env = dict(os.environ)
+    token = _token()
+    if token:
+        env["GH_TOKEN"] = token
+        env["GITHUB_TOKEN"] = token
+    return env
+
+
+def _preflight_pr_target(
+    repo_path: str,
+    *,
+    raw_url: str,
+    token: str,
+    base_branch: str,
+) -> tuple[bool, str]:
+    """Validate candidate target has common history with HEAD and pending commits."""
+    authed_url = _inject_token(raw_url, token)
+    fetch_result = run_bash(
+        ["git", "fetch", "--quiet", authed_url, base_branch],
+        cwd=repo_path,
+        check=False,
+        capture_output=True,
+    )
+    if fetch_result.returncode != 0:
+        return False, f"unable to fetch base '{base_branch}': {(fetch_result.stderr or '').strip()}"
+
+    merge_base_result = _git(["merge-base", "HEAD", "FETCH_HEAD"], repo_path=repo_path, check=False)
+    if merge_base_result.returncode != 0:
+        return (
+            False,
+            f"branch has no common history with target base '{base_branch}'",
+        )
+
+    ahead_result = _git(["rev-list", "--count", "FETCH_HEAD..HEAD"], repo_path=repo_path, check=False)
+    if ahead_result.returncode != 0:
+        return False, f"unable to compare commits against '{base_branch}'"
+
+    try:
+        ahead_count = int((ahead_result.stdout or "0").strip() or "0")
+    except ValueError:
+        ahead_count = 0
+    if ahead_count <= 0:
+        return False, f"no commits ahead of target base '{base_branch}'"
+
+    return True, ""
 
 
 def create_pr(
@@ -151,8 +210,43 @@ def create_pr(
         cmd.extend(["--base", base_branch])
     if head_branch:
         cmd.extend(["--head", head_branch])
-    result = run_bash(cmd, cwd=repo_path, check=True, capture_output=True)
+    result = run_bash(cmd, cwd=repo_path, env=_gh_env(), check=False, capture_output=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        detail = stderr or stdout or f"gh pr create failed with code {result.returncode}"
+        raise RuntimeError(detail)
     return (result.stdout or "").strip()
+
+
+def _find_existing_pr_url(
+    repo_path: str,
+    *,
+    repo_target: str | None,
+    head_branch: str | None,
+) -> str | None:
+    """Return an existing PR URL for the current branch, if present."""
+    if not head_branch:
+        return None
+    cmd = ["gh", "pr", "list", "--state", "all", "--head", head_branch, "--json", "url"]
+    if repo_target:
+        cmd.extend(["--repo", repo_target])
+    result = run_bash(cmd, cwd=repo_path, env=_gh_env(), check=False, capture_output=True)
+    if result.returncode != 0:
+        return None
+    import json
+
+    try:
+        rows = json.loads((result.stdout or "[]").strip() or "[]")
+    except json.JSONDecodeError:
+        return None
+    if isinstance(rows, list) and rows:
+        first = rows[0]
+        if isinstance(first, dict):
+            candidate = str(first.get("url", "")).strip()
+            if candidate:
+                return candidate
+    return None
 
 
 def create_pr_from_repo(
@@ -241,7 +335,8 @@ def create_pr_from_repo(
 
     workspace_repo_url = os.environ.get("ZERO_HUMAN_WORKSPACE_REPO_URL", "").strip()
     if workspace_repo_url and "github.com" in workspace_repo_url:
-        push_candidates.append(("workspace_repo_url", workspace_repo_url))
+        # Prefer the explicitly configured workspace repo first.
+        push_candidates.insert(0, ("workspace_repo_url", workspace_repo_url))
 
     seen_urls: set[str] = set()
     unique_candidates: list[tuple[str, str]] = []
@@ -253,6 +348,16 @@ def create_pr_from_repo(
         unique_candidates.append((source_name, raw_url))
 
     for source_name, raw_url in unique_candidates:
+        is_valid_target, invalid_reason = _preflight_pr_target(
+            repo_path,
+            raw_url=raw_url,
+            token=token,
+            base_branch=base,
+        )
+        if not is_valid_target:
+            push_errors.append(f"[{source_name}] preflight failed: {invalid_reason}")
+            continue
+
         authed_url = _inject_token(raw_url, token)
         result = run_bash(
             ["git", "push", "-u", authed_url, f"{branch}:{branch}"],
@@ -284,11 +389,21 @@ def create_pr_from_repo(
         head_for_pr = branch
     repo_target = f"{pushed_owner}/{pushed_repo}" if pushed_owner and pushed_repo else None
 
-    return create_pr(
-        repo_path,
-        title=title,
-        body=body,
-        repo_target=repo_target,
-        base_branch=base,
-        head_branch=head_for_pr,
-    )
+    try:
+        return create_pr(
+            repo_path,
+            title=title,
+            body=body,
+            repo_target=repo_target,
+            base_branch=base,
+            head_branch=head_for_pr,
+        )
+    except Exception as pr_err:
+        existing_pr_url = _find_existing_pr_url(
+            repo_path,
+            repo_target=repo_target,
+            head_branch=head_for_pr,
+        )
+        if existing_pr_url:
+            return existing_pr_url
+        raise RuntimeError(f"PR creation failed and no existing PR found: {pr_err}") from pr_err

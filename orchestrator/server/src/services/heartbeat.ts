@@ -60,6 +60,8 @@ import {
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
+const PROCESS_MANAGED_ENV_KEYS = ["OPENAI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "MODEL", "REPO_LINK"] as const;
+const PROCESS_MANAGED_ENV_KEY_SET = new Set<string>(PROCESS_MANAGED_ENV_KEYS);
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
 const startLocksByAgent = new Map<string, Promise<void>>();
@@ -475,6 +477,27 @@ function parseIssueAssigneeAdapterOverrides(
   return {
     adapterConfig,
     useProjectWorkspace,
+  };
+}
+
+function stripManagedProcessEnvFromAdapterConfig(
+  adapterConfig: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!adapterConfig) return null;
+  const parsedEnv = parseObject(adapterConfig.env);
+  if (!parsedEnv) return adapterConfig;
+  const sanitizedEnv: Record<string, unknown> = { ...parsedEnv };
+  let changed = false;
+  for (const key of PROCESS_MANAGED_ENV_KEY_SET) {
+    if (Object.prototype.hasOwnProperty.call(sanitizedEnv, key)) {
+      delete sanitizedEnv[key];
+      changed = true;
+    }
+  }
+  if (!changed) return adapterConfig;
+  return {
+    ...adapterConfig,
+    env: sanitizedEnv,
   };
 }
 
@@ -1942,13 +1965,47 @@ export function heartbeatService(db: Db) {
       mode: executionWorkspaceMode,
       legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
     });
-    const mergedConfig = issueAssigneeOverrides?.adapterConfig
-      ? { ...workspaceManagedConfig, ...issueAssigneeOverrides.adapterConfig }
+    const assigneeAdapterConfig =
+      agent.adapterType === "process"
+        ? stripManagedProcessEnvFromAdapterConfig(issueAssigneeOverrides?.adapterConfig ?? null)
+        : issueAssigneeOverrides?.adapterConfig ?? null;
+    const mergedConfig = assigneeAdapterConfig
+      ? { ...workspaceManagedConfig, ...assigneeAdapterConfig }
       : workspaceManagedConfig;
-    const { config: resolvedConfig, secretKeys } = await secretsSvc.resolveAdapterConfigForRuntime(
+    let { config: resolvedConfig, secretKeys } = await secretsSvc.resolveAdapterConfigForRuntime(
       agent.companyId,
       mergedConfig,
     );
+    if (agent.adapterType === "process") {
+      const existingEnv = parseObject(resolvedConfig.env);
+      const mergedEnv: Record<string, unknown> = { ...existingEnv };
+      const companySecrets = await secretsSvc.list(agent.companyId);
+      const managedSecretsByName = new Map<string, string>();
+      for (const secret of companySecrets) {
+        managedSecretsByName.set(secret.name.trim().toUpperCase(), secret.id);
+      }
+      for (const key of PROCESS_MANAGED_ENV_KEYS) {
+        delete mergedEnv[key];
+        const secretId = managedSecretsByName.get(key);
+        if (!secretId) continue;
+        try {
+          mergedEnv[key] = await secretsSvc.resolveSecretValue(agent.companyId, secretId, "latest");
+          secretKeys.add(key);
+        } catch (error) {
+          logger.warn(
+            {
+              runId: run.id,
+              companyId: agent.companyId,
+              agentId: agent.id,
+              key,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "failed to resolve managed process adapter env key",
+          );
+        }
+      }
+      resolvedConfig = { ...resolvedConfig, env: mergedEnv };
+    }
     const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
     const runtimeConfig = {
       ...resolvedConfig,

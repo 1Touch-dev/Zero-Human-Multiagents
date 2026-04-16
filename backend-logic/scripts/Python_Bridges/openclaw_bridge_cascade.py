@@ -251,8 +251,9 @@ def build_role_prompt(role_key, role_name, identifier, title, description, skill
             f"3. Create a new branch named after the ticket identifier (e.g. {identifier.lower()}-feature).\n"
             "4. Run: git add . && git commit -m 'feat: <short description of change>'\n"
             "5. Do NOT run gh pr create or git push — PR creation and push are handled by automation.\n"
-            "6. Print explicit terminal logs of every file you changed and every git command you ran.\n"
-            "7. End with a one-line summary: SCRIBE_DONE: <branch-name> ready for automated PR to "
+            "6. NEVER run `git init`, `git remote add`, or `git remote set-url` in this repository.\n"
+            "7. Print explicit terminal logs of every file you changed and every git command you ran.\n"
+            "8. End with a one-line summary: SCRIBE_DONE: <branch-name> ready for automated PR to "
             f"{base_branch}."
         )
 
@@ -345,6 +346,24 @@ def maybe_upload_run_log(*, identifier, role_key, run_id, payload):
 
 def main():
     load_env()
+
+    # ── Company Settings bridge ────────────────────────────────────────────────
+    # The Paperclip UI stores keys under friendly names (REPO_LINK, MODEL).
+    # Map them to the internal names the bridge uses so any non-technical user
+    # can configure everything from the UI without touching .env files.
+    #
+    # REPO_LINK (injected by heartbeat from Company Settings) always wins over
+    # the static ZERO_HUMAN_WORKSPACE_REPO_URL in .env so the UI value is used.
+    repo_link_from_ui = os.environ.get("REPO_LINK", "").strip()
+    if repo_link_from_ui:
+        os.environ["ZERO_HUMAN_WORKSPACE_REPO_URL"] = repo_link_from_ui
+
+    # MODEL from Company Settings maps to OPENCLAW_MODEL (only if not already set).
+    model_from_ui = os.environ.get("MODEL", "").strip()
+    if model_from_ui and not os.environ.get("OPENCLAW_MODEL", "").strip():
+        os.environ["OPENCLAW_MODEL"] = model_from_ui
+    # ──────────────────────────────────────────────────────────────────────────
+
     try:
         env = os.environ.copy()
         env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
@@ -373,7 +392,8 @@ def main():
         title = str(issue.get("title", "Untitled issue")).strip()
         description = str(issue.get("description", "") or "").strip()
 
-        planned_role_keys = None
+        full_role_chain = list(DEFAULT_ROLE_ORDER)
+        planned_role_keys = list(full_role_chain)
         if orchestrate_task and sanitize_plan:
             try:
                 task_context = {
@@ -382,12 +402,17 @@ def main():
                     "title": title,
                     "description": description,
                 }
-                planned_role_keys = sanitize_plan(orchestrate_task(task_context))
-                print(f">>> Orchestrator plan for {identifier}: {planned_role_keys}")
+                orchestrated_role_keys = sanitize_plan(orchestrate_task(task_context))
+                print(f">>> Orchestrator plan for {identifier}: {orchestrated_role_keys}")
+                if orchestrated_role_keys != full_role_chain:
+                    print(
+                        f">>> Full-role enforcement active for {identifier}. "
+                        f"Using {full_role_chain} instead of orchestrator plan."
+                    )
             except Exception as plan_err:
                 print(
                     f"Orchestrator planning failed for {identifier}. "
-                    f"Falling back to legacy role flow. reason={plan_err}",
+                    f"Falling back to enforced full-role flow. reason={plan_err}",
                     file=sys.stderr,
                 )
 
@@ -715,7 +740,177 @@ def main():
             )
             if should_try_auto_pr and not pr_url:
                 workspace_dir = os.environ.get("ZERO_HUMAN_WORKSPACE_DIR", "/tmp/zero-human-sandbox").strip()
-                base_branch = os.environ.get("ZERO_HUMAN_PR_BASE_BRANCH", "").strip() or None
+                base_branch = os.environ.get("ZERO_HUMAN_PR_BASE_BRANCH", "").strip() or "main"
+                workspace_repo_url = os.environ.get("ZERO_HUMAN_WORKSPACE_REPO_URL", "").strip()
+
+                # Remote lock: re-point origin to the workspace repo immediately before
+                # PR fallback, then verify shared ancestry with origin/<base>.
+                if workspace_repo_url:
+                    try:
+                        if run_bash:
+                            set_origin = run_bash(
+                                ["git", "remote", "set-url", "origin", workspace_repo_url],
+                                cwd=workspace_dir,
+                                check=False,
+                                capture_output=True,
+                            )
+                            if set_origin.returncode != 0:
+                                add_origin = run_bash(
+                                    ["git", "remote", "add", "origin", workspace_repo_url],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                )
+                                if add_origin.returncode != 0:
+                                    raise RuntimeError(
+                                        f"unable to set origin to workspace repo: {(set_origin.stderr or '').strip() or (add_origin.stderr or '').strip()}"
+                                    )
+                            fetch_base = run_bash(
+                                ["git", "fetch", "origin", base_branch],
+                                cwd=workspace_dir,
+                                check=False,
+                                capture_output=True,
+                            )
+                            if fetch_base.returncode != 0:
+                                raise RuntimeError(
+                                    f"unable to fetch origin/{base_branch}: {(fetch_base.stderr or '').strip()}"
+                                )
+                            merge_base = run_bash(
+                                ["git", "merge-base", "HEAD", f"origin/{base_branch}"],
+                                cwd=workspace_dir,
+                                check=False,
+                                capture_output=True,
+                            )
+                            if merge_base.returncode != 0:
+                                # Recovery path: rebuild branch from origin/<base> and
+                                # cherry-pick latest commit so PR flow can proceed.
+                                current_branch_result = run_bash(
+                                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                )
+                                head_sha_result = run_bash(
+                                    ["git", "rev-parse", "HEAD"],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                )
+                                source_branch = (current_branch_result.stdout or "").strip()
+                                head_sha = (head_sha_result.stdout or "").strip()
+                                if current_branch_result.returncode != 0 or head_sha_result.returncode != 0 or not head_sha:
+                                    raise RuntimeError(
+                                        f"branch has no common history with origin/{base_branch} after origin lock"
+                                    )
+                                recovery_branch = source_branch if source_branch and source_branch != "HEAD" else f"{identifier.lower()}-feature"
+                                reset_branch = run_bash(
+                                    ["git", "checkout", "-B", recovery_branch, f"origin/{base_branch}"],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                )
+                                if reset_branch.returncode != 0:
+                                    raise RuntimeError(
+                                        f"failed recovery checkout to origin/{base_branch}: {(reset_branch.stderr or '').strip()}"
+                                    )
+                                cherry_pick = run_bash(
+                                    ["git", "cherry-pick", head_sha],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                )
+                                if cherry_pick.returncode != 0:
+                                    raise RuntimeError(
+                                        f"failed recovery cherry-pick from {head_sha}: {(cherry_pick.stderr or '').strip()}"
+                                    )
+                        else:
+                            set_origin = subprocess.run(
+                                ["git", "remote", "set-url", "origin", workspace_repo_url],
+                                cwd=workspace_dir,
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                            )
+                            if set_origin.returncode != 0:
+                                add_origin = subprocess.run(
+                                    ["git", "remote", "add", "origin", workspace_repo_url],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                if add_origin.returncode != 0:
+                                    raise RuntimeError(
+                                        f"unable to set origin to workspace repo: {(set_origin.stderr or '').strip() or (add_origin.stderr or '').strip()}"
+                                    )
+                            fetch_base = subprocess.run(
+                                ["git", "fetch", "origin", base_branch],
+                                cwd=workspace_dir,
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                            )
+                            if fetch_base.returncode != 0:
+                                raise RuntimeError(
+                                    f"unable to fetch origin/{base_branch}: {(fetch_base.stderr or '').strip()}"
+                                )
+                            merge_base = subprocess.run(
+                                ["git", "merge-base", "HEAD", f"origin/{base_branch}"],
+                                cwd=workspace_dir,
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                            )
+                            if merge_base.returncode != 0:
+                                # Recovery path: rebuild branch from origin/<base> and
+                                # cherry-pick latest commit so PR flow can proceed.
+                                current_branch_result = subprocess.run(
+                                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                head_sha_result = subprocess.run(
+                                    ["git", "rev-parse", "HEAD"],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                source_branch = (current_branch_result.stdout or "").strip()
+                                head_sha = (head_sha_result.stdout or "").strip()
+                                if current_branch_result.returncode != 0 or head_sha_result.returncode != 0 or not head_sha:
+                                    raise RuntimeError(
+                                        f"branch has no common history with origin/{base_branch} after origin lock"
+                                    )
+                                recovery_branch = source_branch if source_branch and source_branch != "HEAD" else f"{identifier.lower()}-feature"
+                                reset_branch = subprocess.run(
+                                    ["git", "checkout", "-B", recovery_branch, f"origin/{base_branch}"],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                if reset_branch.returncode != 0:
+                                    raise RuntimeError(
+                                        f"failed recovery checkout to origin/{base_branch}: {(reset_branch.stderr or '').strip()}"
+                                    )
+                                cherry_pick = subprocess.run(
+                                    ["git", "cherry-pick", head_sha],
+                                    cwd=workspace_dir,
+                                    check=False,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                if cherry_pick.returncode != 0:
+                                    raise RuntimeError(
+                                        f"failed recovery cherry-pick from {head_sha}: {(cherry_pick.stderr or '').strip()}"
+                                    )
+                    except Exception as pre_pr_err:
+                        raise RuntimeError(
+                            f"Pre-PR remote lock failed for {identifier}: {pre_pr_err}"
+                        ) from pre_pr_err
                 try:
                     pr_url = create_pr_from_repo(
                         workspace_dir,
