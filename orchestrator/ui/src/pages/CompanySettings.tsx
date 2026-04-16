@@ -1,11 +1,14 @@
-import { ChangeEvent, useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { CompanySecret, EnvBinding } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToast } from "../context/ToastContext";
 import { companiesApi } from "../api/companies";
 import { accessApi } from "../api/access";
 import { assetsApi } from "../api/assets";
+import { agentsApi } from "../api/agents";
+import { secretsApi } from "../api/secrets";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Settings, Check, Download, Upload } from "lucide-react";
@@ -21,6 +24,65 @@ type AgentSnippetInput = {
   connectionCandidates?: string[] | null;
   testResolutionUrl?: string | null;
 };
+
+const SIMPLE_ENV_FIELDS = [
+  {
+    key: "OPENAI_API_KEY",
+    label: "OpenAI API Key",
+    hint: "Your OpenAI API key (starts with sk-). Used by all AI agents.",
+    placeholder: "sk-proj-...",
+    sensitive: true,
+  },
+  {
+    key: "GITHUB_TOKEN",
+    label: "GitHub Token (GITHUB_TOKEN)",
+    hint: "Personal access token for the GitHub account that owns the repo. Needs 'repo' scope to clone, push, and create PRs.",
+    placeholder: "ghp_...",
+    sensitive: true,
+  },
+  {
+    key: "GH_TOKEN",
+    label: "GitHub Token (GH_TOKEN)",
+    hint: "Same token as above — set both fields to the same value so the gh CLI and git both authenticate correctly.",
+    placeholder: "ghp_...",
+    sensitive: true,
+  },
+  {
+    key: "MODEL",
+    label: "AI Model",
+    hint: "Model used by agents, e.g. openai/gpt-4o or openai/gpt-5.4. Leave blank to use the default.",
+    placeholder: "openai/gpt-4o",
+    sensitive: false,
+  },
+  {
+    key: "REPO_LINK",
+    label: "Repository URL",
+    hint: "Full GitHub URL of the repo agents should work in (e.g. https://github.com/your-org/your-repo). Agents clone this repo, make changes, and open PRs here.",
+    placeholder: "https://github.com/your-org/your-repo",
+    sensitive: false,
+  },
+] as const;
+
+type ManagedEnvKey = (typeof SIMPLE_ENV_FIELDS)[number]["key"];
+
+function createManagedEnvState<T>(value: T): Record<ManagedEnvKey, T> {
+  return {
+    OPENAI_API_KEY: value,
+    GITHUB_TOKEN: value,
+    GH_TOKEN: value,
+    MODEL: value,
+    REPO_LINK: value,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function normalizeSecretName(value: string): string {
+  return value.trim().toUpperCase();
+}
 
 export function CompanySettings() {
   const {
@@ -52,6 +114,41 @@ export function CompanySettings() {
   const [inviteSnippet, setInviteSnippet] = useState<string | null>(null);
   const [snippetCopied, setSnippetCopied] = useState(false);
   const [snippetCopyDelightId, setSnippetCopyDelightId] = useState(0);
+  const [envValues, setEnvValues] = useState<Record<ManagedEnvKey, string>>(
+    () => createManagedEnvState(""),
+  );
+  const [envClearFlags, setEnvClearFlags] = useState<Record<ManagedEnvKey, boolean>>(
+    () => createManagedEnvState(false),
+  );
+  const [syncEnvToAgents, setSyncEnvToAgents] = useState(true);
+
+  const secretsQuery = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.secrets.list(selectedCompanyId) : ["secrets", "none"],
+    queryFn: () => secretsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+
+  const managedSecretsByName = useMemo(() => {
+    const map = new Map<ManagedEnvKey, CompanySecret>();
+    const keySet = new Set<ManagedEnvKey>(SIMPLE_ENV_FIELDS.map((field) => field.key));
+    for (const field of SIMPLE_ENV_FIELDS) {
+      const existing = (secretsQuery.data ?? []).find(
+        (secret) => normalizeSecretName(secret.name) === field.key,
+      );
+      if (existing) {
+        map.set(field.key, existing);
+      }
+    }
+    for (const secret of secretsQuery.data ?? []) {
+      const normalized = normalizeSecretName(secret.name);
+      if (!keySet.has(normalized as ManagedEnvKey)) continue;
+      const mappedKey = normalized as ManagedEnvKey;
+      if (!map.has(mappedKey)) {
+        map.set(mappedKey, secret);
+      }
+    }
+    return map;
+  }, [secretsQuery.data]);
 
   const generalDirty =
     !!selectedCompany &&
@@ -174,7 +271,166 @@ export function CompanySettings() {
     setInviteSnippet(null);
     setSnippetCopied(false);
     setSnippetCopyDelightId(0);
+    setEnvValues(createManagedEnvState(""));
+    setEnvClearFlags(createManagedEnvState(false));
   }, [selectedCompanyId]);
+
+  const envMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCompanyId) throw new Error("Select a company first.");
+
+      const latestSecrets = await secretsApi.list(selectedCompanyId);
+      const managedSecrets = new Map<ManagedEnvKey, CompanySecret>();
+      for (const field of SIMPLE_ENV_FIELDS) {
+        const existing = latestSecrets.find(
+          (secret) => normalizeSecretName(secret.name) === field.key,
+        );
+        if (existing) managedSecrets.set(field.key, existing);
+      }
+      const deletedKeys = new Set<ManagedEnvKey>();
+      let upsertedCount = 0;
+      let clearedCount = 0;
+
+      for (const field of SIMPLE_ENV_FIELDS) {
+        const key = field.key;
+        const enteredValue = envValues[key].trim();
+        const shouldClear = envClearFlags[key];
+        const existing = managedSecrets.get(key);
+
+        if (enteredValue.length > 0) {
+          let nextSecret: CompanySecret;
+          if (existing) {
+            nextSecret = await secretsApi.rotate(existing.id, { value: enteredValue });
+          } else {
+            try {
+              nextSecret = await secretsApi.create(selectedCompanyId, {
+                name: key,
+                value: enteredValue,
+                description: `Managed from Company Settings (${key})`,
+              });
+            } catch (err) {
+              const latest = await secretsApi.list(selectedCompanyId);
+              const matched = latest.find(
+                (secret) => normalizeSecretName(secret.name) === key,
+              );
+              if (!matched) throw err;
+              nextSecret = await secretsApi.rotate(matched.id, { value: enteredValue });
+            }
+          }
+          managedSecrets.set(key, nextSecret);
+          deletedKeys.delete(key);
+          upsertedCount += 1;
+          continue;
+        }
+
+        if (shouldClear && existing) {
+          await secretsApi.remove(existing.id);
+          managedSecrets.delete(key);
+          deletedKeys.add(key);
+          clearedCount += 1;
+        }
+      }
+
+      let syncedAgents = 0;
+      let skippedAgents = 0;
+      let syncWarning: string | null = null;
+      if (syncEnvToAgents) {
+        try {
+          const agents = await agentsApi.list(selectedCompanyId);
+
+          for (const agent of agents) {
+            if (agent.status === "terminated") continue;
+            const adapterConfig = asRecord(agent.adapterConfig) ?? {};
+            const rawEnv = asRecord(adapterConfig.env);
+            const nextEnv: Record<string, EnvBinding> = { ...(rawEnv as Record<string, EnvBinding> | null ?? {}) };
+            let changed = false;
+
+            for (const field of SIMPLE_ENV_FIELDS) {
+              const key = field.key;
+              const secret = managedSecrets.get(key);
+              if (secret) {
+                const existingBinding = nextEnv[key];
+                const existingRef =
+                  typeof existingBinding === "object" &&
+                  existingBinding !== null &&
+                  "type" in existingBinding &&
+                  "secretId" in existingBinding
+                    ? existingBinding
+                    : null;
+                if (
+                  !existingRef ||
+                  existingRef.type !== "secret_ref" ||
+                  existingRef.secretId !== secret.id
+                ) {
+                  nextEnv[key] = { type: "secret_ref", secretId: secret.id, version: "latest" };
+                  changed = true;
+                }
+                continue;
+              }
+
+              if (deletedKeys.has(key) && Object.prototype.hasOwnProperty.call(nextEnv, key)) {
+                delete nextEnv[key];
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              try {
+                await agentsApi.update(
+                  agent.id,
+                  {
+                    adapterConfig: {
+                      ...adapterConfig,
+                      env: nextEnv,
+                    },
+                  },
+                  selectedCompanyId,
+                );
+                syncedAgents += 1;
+              } catch {
+                skippedAgents += 1;
+              }
+            }
+          }
+        } catch (err) {
+          syncWarning = err instanceof Error ? err.message : "Agent sync unavailable";
+        }
+      }
+
+      return { upsertedCount, clearedCount, syncedAgents, skippedAgents, syncWarning };
+    },
+    onSuccess: async ({ upsertedCount, clearedCount, syncedAgents, skippedAgents, syncWarning }) => {
+      setEnvValues(createManagedEnvState(""));
+      setEnvClearFlags(createManagedEnvState(false));
+      await queryClient.invalidateQueries({ queryKey: queryKeys.secrets.list(selectedCompanyId!) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
+      pushToast({
+        tone: "success",
+        title: "Environment settings saved",
+        body:
+          `Updated ${upsertedCount} value(s)` +
+          (clearedCount > 0 ? `, cleared ${clearedCount}` : "") +
+          (syncEnvToAgents
+            ? `, synced ${syncedAgents} agent(s)` +
+              (skippedAgents > 0 ? `, skipped ${skippedAgents} missing agent(s).` : ".")
+            : "."),
+      });
+      if (syncWarning) {
+        pushToast({
+          tone: "warn",
+          title: "Environment saved, but agent sync was skipped",
+          body: syncWarning,
+        });
+      }
+    },
+    onError: (err) => {
+      pushToast({
+        tone: "error",
+        title: "Failed to save environment settings",
+        body: err instanceof Error ? err.message : "Unknown error",
+      });
+    },
+  });
 
   const archiveMutation = useMutation({
     mutationFn: ({
@@ -460,6 +716,101 @@ export function CompanySettings() {
               </div>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Environment Setup */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Environment Setup
+        </div>
+        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+          <p className="text-sm text-muted-foreground">
+            Fill in your API keys and repository URL here — no backend access needed.
+            Agents will automatically clone your repo, complete the task, and open a PR using these values.
+            All values are stored as encrypted company secrets.
+          </p>
+          {secretsQuery.error && (
+            <p className="text-xs text-destructive">
+              {secretsQuery.error instanceof Error
+                ? secretsQuery.error.message
+                : "Failed to load existing environment settings."}
+            </p>
+          )}
+          <div className="space-y-3">
+            {SIMPLE_ENV_FIELDS.map((field) => {
+              const configured = managedSecretsByName.get(field.key) ?? null;
+              return (
+                <Field key={field.key} label={field.label} hint={field.hint}>
+                  <div className="space-y-1.5">
+                    <input
+                      className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none"
+                      type={field.sensitive ? "password" : "text"}
+                      value={envValues[field.key]}
+                      placeholder={
+                        configured
+                          ? "Leave blank to keep current value"
+                          : field.placeholder
+                      }
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setEnvValues((prev) => ({ ...prev, [field.key]: value }));
+                        if (value.length > 0) {
+                          setEnvClearFlags((prev) => ({ ...prev, [field.key]: false }));
+                        }
+                      }}
+                    />
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-muted-foreground">
+                        {configured
+                          ? `Configured (version ${configured.latestVersion})`
+                          : "Not configured yet"}
+                      </span>
+                      {configured && (
+                        <label className="inline-flex items-center gap-1 text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={envClearFlags[field.key]}
+                            onChange={(e) =>
+                              setEnvClearFlags((prev) => ({
+                                ...prev,
+                                [field.key]: e.target.checked,
+                              }))
+                            }
+                          />
+                          Clear on save
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                </Field>
+              );
+            })}
+          </div>
+          <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+            <ToggleField
+              label="Sync these environment keys to existing agents"
+              hint="When enabled, agents in this company automatically receive secret refs for these keys."
+              checked={syncEnvToAgents}
+              onChange={setSyncEnvToAgents}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => envMutation.mutate()}
+              disabled={envMutation.isPending || secretsQuery.isLoading}
+            >
+              {envMutation.isPending ? "Saving..." : "Save environment settings"}
+            </Button>
+            {envMutation.isError && (
+              <span className="text-xs text-destructive">
+                {envMutation.error instanceof Error
+                  ? envMutation.error.message
+                  : "Failed to save settings"}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
