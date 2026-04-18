@@ -98,6 +98,14 @@ export type {
   BudgetIncidentResolutionInput,
 } from "./budget.js";
 export type {
+  NotificationChannel,
+  TelegramChannelSettings,
+  NotificationChannelSettings,
+  NotificationChannelTestResult,
+  NotificationDeliveryLog,
+  NotificationChannelMapping,
+} from "./channels.js";
+export type {
   SecretProvider,
   SecretVersionSelector,
   EnvPlainBinding,

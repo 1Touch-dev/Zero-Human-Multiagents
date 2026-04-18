@@ -176,6 +176,19 @@ export {
 } from "./approval.js";
 
 export {
+  createNotificationChannelSchema,
+  updateNotificationChannelSchema,
+  testNotificationChannelSchema,
+  testDraftNotificationChannelSchema,
+  saveNotificationChannelMappingsSchema,
+  type CreateNotificationChannel,
+  type UpdateNotificationChannel,
+  type TestNotificationChannel,
+  type TestDraftNotificationChannel,
+  type SaveNotificationChannelMappings,
+} from "./channel.js";
+
+export {
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,

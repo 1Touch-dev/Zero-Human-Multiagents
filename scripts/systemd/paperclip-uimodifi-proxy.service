@@ -1,4 +1,6 @@
 [Unit]
+# Public :3301 must forward only to 127.0.0.1:3302 (preview app). A stray socat on :3301
+# pointing elsewhere (e.g. :3003) steals the port; systemd then cannot bind and curl shows "Empty reply".
 Description=Paperclip PaperclipUimodifi preview proxy (public :3301 to 127.0.0.1:3302)
 After=network.target paperclip-uimodifi-preview.service
 

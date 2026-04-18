@@ -309,6 +309,27 @@
       "when": 1774008910991,
       "tag": "0043_reflective_captain_universe",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1776355200000,
+      "tag": "0044_vast_night_nurse",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1776384000000,
+      "tag": "0045_mighty_karnak",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1776391200000,
+      "tag": "0046_silent_norrin_radd",
+      "breakpoints": true
     }
   ]
 }

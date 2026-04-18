@@ -51,6 +51,7 @@ import {
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
+import { notificationService } from "./notifications.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -744,6 +745,7 @@ function resolveNextSessionState(input: {
 
 export function heartbeatService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
+  const notifications = notificationService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
@@ -1652,6 +1654,39 @@ export function heartbeatService(db: Db) {
           outcome,
         },
       });
+
+      const shouldSendAlert = outcome === "failed" || outcome === "timed_out" || outcome === "succeeded";
+      const isRecovered = existing.status === "error" && updated.status === "idle" && outcome === "succeeded";
+      if (shouldSendAlert || isRecovered) {
+        const eventType = outcome === "failed"
+          ? "agent_failed"
+          : outcome === "timed_out"
+            ? "agent_timed_out"
+            : isRecovered
+              ? "agent_recovered"
+              : "agent_succeeded";
+        const severity = outcome === "failed" ? "critical" : outcome === "timed_out" ? "warning" : "info";
+        const liveAlertError = outcome === "failed"
+          ? "Agent heartbeat run failed."
+          : outcome === "timed_out"
+            ? "Agent heartbeat run timed out."
+            : isRecovered
+              ? "Agent recovered and is now idle."
+              : "Agent heartbeat run succeeded.";
+        void notifications
+          .dispatchAgentAlert(updated.companyId, {
+            agentId: updated.id,
+            agentName: updated.name,
+            status: updated.status,
+            outcome,
+            eventType,
+            severity,
+            errorMessage: liveAlertError,
+          })
+          .catch((err) => {
+            logger.warn({ err, agentId: updated.id }, "failed to dispatch agent alert notification");
+          });
+      }
     }
   }
 

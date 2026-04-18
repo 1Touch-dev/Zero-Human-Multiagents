@@ -204,6 +204,27 @@ export const SECRET_PROVIDERS = [
 ] as const;
 export type SecretProvider = (typeof SECRET_PROVIDERS)[number];
 
+export const NOTIFICATION_CHANNEL_PROVIDERS = [
+  "telegram",
+  "slack",
+  "whatsapp",
+] as const;
+export type NotificationChannelProvider = (typeof NOTIFICATION_CHANNEL_PROVIDERS)[number];
+
+export const NOTIFICATION_CHANNEL_TEST_STATUSES = ["success", "failed"] as const;
+export type NotificationChannelTestStatus = (typeof NOTIFICATION_CHANNEL_TEST_STATUSES)[number];
+
+export const NOTIFICATION_EVENT_TYPES = [
+  "agent_failed",
+  "agent_timed_out",
+  "agent_recovered",
+  "agent_succeeded",
+] as const;
+export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
+
+export const NOTIFICATION_SEVERITIES = ["critical", "warning", "info"] as const;
+export type NotificationSeverity = (typeof NOTIFICATION_SEVERITIES)[number];
+
 export const STORAGE_PROVIDERS = ["local_disk", "s3"] as const;
 export type StorageProvider = (typeof STORAGE_PROVIDERS)[number];
 
