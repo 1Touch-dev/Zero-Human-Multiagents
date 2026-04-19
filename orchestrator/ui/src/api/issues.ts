@@ -93,6 +93,45 @@ export const issuesApi = {
   },
   deleteAttachment: (id: string) => api.delete<{ ok: true }>(`/attachments/${id}`),
   listApprovals: (id: string) => api.get<Approval[]>(`/issues/${id}/approvals`),
+  getExecutionPreview: (id: string) =>
+    api.get<{
+      issueId: string;
+      status: string;
+      mode: "always_proceed" | "ask_before_proceed";
+      scope: "major_only" | "every_issue";
+      approval: {
+        id: string;
+        status: string;
+        decisionNote: string | null;
+        decidedAt: string | null;
+        requestedAt: string;
+      } | null;
+      preview: {
+        issueId: string;
+        identifier: string | null;
+        title: string;
+        mode: "always_proceed" | "ask_before_proceed";
+        scope: "major_only" | "every_issue";
+        majorCategories: string[];
+        rolePlan: Array<{
+          role: "architect" | "grunt" | "pedant" | "scribe";
+          provider: string;
+          model: string;
+          source: "default" | "role_override";
+        }>;
+        plannedActions: string[];
+      };
+    }>(`/issues/${id}/execution-preview`),
+  decideExecutionPreview: (
+    id: string,
+    data: { decision: "approve" | "reject" | "request_changes"; note?: string | null },
+  ) =>
+    api.post<{
+      issueId: string;
+      decision: "approve" | "reject" | "request_changes";
+      applied: boolean;
+      approval: Approval;
+    }>(`/issues/${id}/execution-preview/decision`, data),
   linkApproval: (id: string, approvalId: string) =>
     api.post<Approval[]>(`/issues/${id}/approvals`, { approvalId }),
   unlinkApproval: (id: string, approvalId: string) =>

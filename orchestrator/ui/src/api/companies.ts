@@ -1,5 +1,9 @@
 import type {
   Company,
+  CompanyLlmSettings,
+  ListLlmModelsQuery,
+  TestCompanyLlmSettings,
+  UpdateCompanyLlmSettings,
   CompanyPortabilityExportPreviewResult,
   CompanyPortabilityExportResult,
   CompanyPortabilityImportRequest,
@@ -11,6 +15,30 @@ import type {
 import { api } from "./client";
 
 export type CompanyStats = Record<string, { agentCount: number; issueCount: number }>;
+export type CompanyLlmSettingsResponse = {
+  companyId: string;
+  settings: CompanyLlmSettings;
+  updatedAt: string;
+};
+export type LlmProviderDescriptor = {
+  id: string;
+  label: string;
+  requiresBaseUrl: boolean;
+  supportsModelListProbe?: boolean;
+};
+export type LlmModelsProbeResponse = {
+  provider: string;
+  models: string[];
+  status: "ok" | "failed" | "unsupported";
+  message?: string;
+  details?: unknown;
+};
+export type CompanyLlmTestResponse = {
+  provider: string;
+  model: string;
+  probe: LlmModelsProbeResponse;
+  modelAvailable: boolean | null;
+};
 
 export const companiesApi = {
   list: () => api.get<Company[]>("/companies"),
@@ -78,4 +106,21 @@ export const companiesApi = {
     api.post<CompanyPortabilityPreviewResult>("/companies/import/preview", data),
   importBundle: (data: CompanyPortabilityImportRequest) =>
     api.post<CompanyPortabilityImportResult>("/companies/import", data),
+  getLlmSettings: (companyId: string) =>
+    api.get<CompanyLlmSettingsResponse>(`/companies/${companyId}/llm-settings`),
+  updateLlmSettings: (companyId: string, data: UpdateCompanyLlmSettings) =>
+    api.put<CompanyLlmSettingsResponse>(`/companies/${companyId}/llm-settings`, data),
+  testLlmSettings: (companyId: string, data: TestCompanyLlmSettings) =>
+    api.post<CompanyLlmTestResponse>(`/companies/${companyId}/llm-settings/test`, data),
+  listLlmProviders: () => api.get<LlmProviderDescriptor[]>("/llm/providers"),
+  listLlmModels: (query: ListLlmModelsQuery) => {
+    const params = new URLSearchParams();
+    params.set("provider", query.provider);
+    if (query.base_url) params.set("base_url", query.base_url);
+    if (query.api_key) params.set("api_key", query.api_key);
+    if (typeof query.timeout_seconds === "number") {
+      params.set("timeout_seconds", String(query.timeout_seconds));
+    }
+    return api.get<LlmModelsProbeResponse>(`/llm/models?${params.toString()}`);
+  },
 };

@@ -1,0 +1,39 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - --model
+      - ${VLLM_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --dtype
+      - ${VLLM_DTYPE:-auto}
+      - --gpu-memory-utilization
+      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
+      - --max-model-len
+      - ${VLLM_MAX_MODEL_LEN:-8192}
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "${VLLM_PORT:-8000}:8000"
+    volumes:
+      - ${VLLM_CACHE_DIR:-./data/vllm-cache}:/root/.cache/huggingface
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          python3 -c "import sys,urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3); sys.exit(0)"
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 60s
+    restart: unless-stopped
+
+  server:
+    depends_on:
+      vllm:
+        condition: service_healthy
+

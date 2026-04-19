@@ -27,6 +27,7 @@ import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { channelRoutes } from "./routes/channels.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { llmRoutes } from "./routes/llms.js";
+import { companyLlmSettingsRoutes } from "./routes/company-llm-settings.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
@@ -155,6 +156,7 @@ export async function createApp(
   api.use(sidebarBadgeRoutes(db));
   api.use(channelRoutes(db));
   api.use(instanceSettingsRoutes(db));
+  api.use(companyLlmSettingsRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = createPluginWorkerManager();
   const pluginRegistry = pluginRegistryService(db);

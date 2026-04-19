@@ -8,6 +8,8 @@ import {
   createIssueLabelSchema,
   checkoutIssueSchema,
   createIssueSchema,
+  type CompanyLlmSettings,
+  issueExecutionPreviewDecisionSchema,
   linkIssueApprovalSchema,
   issueDocumentKeySchema,
   updateIssueWorkProductSchema,
@@ -19,6 +21,8 @@ import { validate } from "../middleware/validate.js";
 import {
   accessService,
   agentService,
+  approvalService,
+  companyLlmSettingsService,
   executionWorkspaceService,
   goalService,
   heartbeatService,
@@ -32,17 +36,70 @@ import {
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
 import { forbidden, HttpError, unauthorized } from "../errors.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
-import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { queueIssueAssignmentWakeup, wakeAgentsAfterHumanGateClears } from "../services/issue-assignment-wakeup.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+const ASK_BEFORE_PROCEED_APPROVAL_TYPE = "ask_before_proceed_execution";
+const ASK_MAJOR_CATEGORIES = [
+  "pr_merge_protected_push",
+  "deploy_prod_config_change",
+  "destructive_data_action",
+  "security_sensitive_policy_change",
+  "high_cost_model_provider_switch",
+] as const;
+
+function classifyMajorCategories(issue: { title?: string | null; description?: string | null }) {
+  const source = `${issue.title ?? ""}\n${issue.description ?? ""}`;
+  const categories: string[] = [];
+  const maybePush = (category: string, pattern: RegExp) => {
+    if (pattern.test(source) && !categories.includes(category)) categories.push(category);
+  };
+  maybePush("pr_merge_protected_push", /\b(pr|pull request|merge|protected branch|protected push|git push)\b/i);
+  maybePush("deploy_prod_config_change", /\b(deploy|deployment|prod|production|rollout|release|k8s|helm|terraform)\b/i);
+  maybePush("destructive_data_action", /\b(delete|truncate|drop table|wipe|purge|erase|remove all)\b/i);
+  maybePush("security_sensitive_policy_change", /\b(permission|policy|rbac|iam|oauth|secret|credential|access control)\b/i);
+  maybePush("high_cost_model_provider_switch", /\b(model|provider|llm).*\b(switch|change|upgrade|migrate|replace)\b/i);
+  return categories.filter((category) => ASK_MAJOR_CATEGORIES.includes(category as (typeof ASK_MAJOR_CATEGORIES)[number]));
+}
+
+function buildExecutionPreview(issue: { id: string; identifier: string | null; title: string; description: string | null }, settings: CompanyLlmSettings) {
+  const roles: Array<"architect" | "grunt" | "pedant" | "scribe"> = ["architect", "grunt", "pedant", "scribe"];
+  const rolePlan = roles.map((role) => {
+    const override = settings.llm.role_models[role];
+    return {
+      role,
+      provider: override?.provider ?? settings.llm.default_provider,
+      model: override?.model ?? settings.llm.default_model,
+      source: override ? "role_override" : "default",
+    };
+  });
+  const majorCategories = classifyMajorCategories(issue);
+  return {
+    issueId: issue.id,
+    identifier: issue.identifier,
+    title: issue.title,
+    mode: settings.execution_gate.mode,
+    scope: settings.execution_gate.scope,
+    majorCategories,
+    rolePlan,
+    plannedActions: [
+      "Run Architect planning pass",
+      "Run Grunt implementation pass",
+      "Run Pedant validation pass",
+      "Run Scribe finalization + PR handoff",
+    ],
+  };
+}
 
 export function issueRoutes(db: Db, storage: StorageService) {
   const router = Router();
   const svc = issueService(db);
   const access = accessService(db);
+  const approvalsSvc = approvalService(db);
+  const companyLlmSvc = companyLlmSettingsService(db);
   const heartbeat = heartbeatService(db);
   const agentsSvc = agentService(db);
   const projectsSvc = projectService(db);
@@ -56,6 +113,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
   });
+
+  async function getLatestAskApproval(issueId: string) {
+    const approvals = await issueApprovalsSvc.listApprovalsForIssue(issueId);
+    return approvals.find((approval) => approval.type === ASK_BEFORE_PROCEED_APPROVAL_TYPE) ?? null;
+  }
 
   function withContentPath<T extends { id: string }>(attachment: T) {
     return {
@@ -764,7 +826,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
 
     const actor = getActorInfo(req);
-    const issue = await svc.create(companyId, {
+    let issue = await svc.create(companyId, {
       ...req.body,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
@@ -782,17 +844,164 @@ export function issueRoutes(db: Db, storage: StorageService) {
       details: { title: issue.title, identifier: issue.identifier },
     });
 
-    void queueIssueAssignmentWakeup({
-      heartbeat,
-      issue,
-      reason: "issue_assigned",
-      mutation: "create",
-      contextSource: "issue.create",
-      requestedByActorType: actor.actorType,
-      requestedByActorId: actor.actorId,
-    });
+    const llmSettings = await companyLlmSvc.getForCompany(companyId);
+    const preview = buildExecutionPreview(issue, llmSettings.settings);
+    const requiresAskApproval = llmSettings.settings.execution_gate.mode === "ask_before_proceed"
+      && (llmSettings.settings.execution_gate.scope === "every_issue" || preview.majorCategories.length > 0);
+
+    if (requiresAskApproval) {
+      const approval = await approvalsSvc.create(companyId, {
+        type: ASK_BEFORE_PROCEED_APPROVAL_TYPE,
+        requestedByAgentId: actor.agentId ?? null,
+        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        status: "pending",
+        payload: {
+          execution_preview: preview,
+        },
+        decisionNote: null,
+        decidedByUserId: null,
+        decidedAt: null,
+        updatedAt: new Date(),
+      });
+      await issueApprovalsSvc.link(issue.id, approval.id, {
+        agentId: actor.agentId,
+        userId: actor.actorType === "user" ? actor.actorId : null,
+      });
+      const gatedIssue = await svc.update(issue.id, { status: "awaiting_human_approval" });
+      if (gatedIssue) issue = gatedIssue;
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.execution_preview_awaiting_decision",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          approvalId: approval.id,
+          mode: llmSettings.settings.execution_gate.mode,
+          scope: llmSettings.settings.execution_gate.scope,
+          majorCategories: preview.majorCategories,
+        },
+      });
+    } else {
+      void queueIssueAssignmentWakeup({
+        heartbeat,
+        issue,
+        reason: "issue_assigned",
+        mutation: "create",
+        contextSource: "issue.create",
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+      });
+    }
 
     res.status(201).json(issue);
+  });
+
+  router.get("/issues/:id/execution-preview", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    const llmSettings = await companyLlmSvc.getForCompany(issue.companyId);
+    const approval = await getLatestAskApproval(id);
+    const payloadPreview = approval
+      ? ((approval.payload as Record<string, unknown> | null)?.execution_preview as Record<string, unknown> | undefined)
+      : undefined;
+    const fallbackPreview = buildExecutionPreview(issue, llmSettings.settings);
+    res.json({
+      issueId: issue.id,
+      status: issue.status,
+      mode: llmSettings.settings.execution_gate.mode,
+      scope: llmSettings.settings.execution_gate.scope,
+      approval: approval
+        ? {
+          id: approval.id,
+          status: approval.status,
+          decisionNote: approval.decisionNote,
+          decidedAt: approval.decidedAt,
+          requestedAt: approval.createdAt,
+        }
+        : null,
+      preview: payloadPreview ?? fallbackPreview,
+    });
+  });
+
+  router.post("/issues/:id/execution-preview/decision", validate(issueExecutionPreviewDecisionSchema), async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    const approval = await getLatestAskApproval(id);
+    if (!approval) {
+      res.status(404).json({ error: "No ask-before-proceed approval found for this issue" });
+      return;
+    }
+    const actor = getActorInfo(req);
+    const decidedBy = actor.actorType === "user" ? actor.actorId : "board";
+    const note = req.body.note ?? null;
+    const decision = req.body.decision as "approve" | "reject" | "request_changes";
+    const resolved = decision === "approve"
+      ? await approvalsSvc.approve(approval.id, decidedBy, note)
+      : decision === "reject"
+        ? await approvalsSvc.reject(approval.id, decidedBy, note)
+        : { approval: await approvalsSvc.requestRevision(approval.id, decidedBy, note), applied: true };
+
+    if (resolved.applied && decision === "approve") {
+      const reopened = await svc.update(id, { status: "todo" });
+      if (reopened) {
+        wakeAgentsAfterHumanGateClears({
+          heartbeat,
+          agentsSvc: agentsSvc,
+          issue: reopened,
+          approval: {
+            id: resolved.approval.id,
+            requestedByAgentId: resolved.approval.requestedByAgentId,
+          },
+          mutation: "update",
+          contextSource: "issue.execution_preview.decision",
+          requestedByActorType:
+            actor.actorType === "user"
+              ? "user"
+              : actor.actorType === "agent"
+                ? "agent"
+                : "board",
+          requestedByActorId: actor.actorId,
+        });
+      }
+    }
+    if (resolved.applied && decision === "reject") {
+      await svc.update(id, { status: "blocked" });
+    }
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: `issue.execution_preview_${decision}`,
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        approvalId: approval.id,
+        decision,
+      },
+    });
+    res.json({
+      issueId: issue.id,
+      decision,
+      approval: resolved.approval,
+      applied: resolved.applied,
+    });
   });
 
   router.patch("/issues/:id", validate(updateIssueSchema), async (req, res) => {

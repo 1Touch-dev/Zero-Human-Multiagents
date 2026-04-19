@@ -22,6 +22,14 @@ export { dashboardService } from "./dashboard.js";
 export { sidebarBadgeService } from "./sidebar-badges.js";
 export { accessService } from "./access.js";
 export { instanceSettingsService } from "./instance-settings.js";
+export {
+  validateCompanyLlmSettings,
+  encryptCompanyLlmSettingsForStorage,
+  hydrateCompanyLlmSettingsFromStorage,
+  llmProviderIdFromUnknown,
+  type CompanyLlmSettingsStorageRecord,
+} from "./company-llm-settings-storage.js";
+export { companyLlmSettingsService } from "./company-llm-settings.js";
 export { companyPortabilityService } from "./company-portability.js";
 export { executionWorkspaceService } from "./execution-workspaces.js";
 export { workspaceOperationService } from "./workspace-operations.js";

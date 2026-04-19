@@ -44,6 +44,7 @@ export { approvalComments } from "./approval_comments.js";
 export { activityLog } from "./activity_log.js";
 export { companySecrets } from "./company_secrets.js";
 export { companySecretVersions } from "./company_secret_versions.js";
+export { companyLlmSettings } from "./company_llm_settings.js";
 export { notificationChannels } from "./notification_channels.js";
 export { notificationChannelMappings } from "./notification_channel_mappings.js";
 export { notificationDeliveryLogs } from "./notification_delivery_logs.js";

@@ -1,6 +1,13 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { CompanySecret, EnvBinding } from "@paperclipai/shared";
+import type {
+  CompanySecret,
+  EnvBinding,
+  CompanyLlmSettings,
+  LlmProviderId,
+  UpdateCompanyLlmSettings,
+  TestCompanyLlmSettings,
+} from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToast } from "../context/ToastContext";
@@ -18,6 +25,14 @@ import {
   ToggleField,
   HintIcon
 } from "../components/agent-config-primitives";
+import { cn } from "@/lib/utils";
+
+/** Shared styles for native <select> in dark mode (see index.css select rules). */
+const nativeSelectClassName = cn(
+  "min-w-0 rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none",
+  "transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
+  "disabled:cursor-not-allowed disabled:opacity-60",
+);
 
 type AgentSnippetInput = {
   onboardingTextUrl: string;
@@ -64,6 +79,59 @@ const SIMPLE_ENV_FIELDS = [
 ] as const;
 
 type ManagedEnvKey = (typeof SIMPLE_ENV_FIELDS)[number]["key"];
+type RoleKey = "architect" | "grunt" | "pedant" | "scribe";
+
+const ROLE_LABELS: Record<RoleKey, string> = {
+  architect: "Architect",
+  grunt: "Grunt",
+  pedant: "Pedant",
+  scribe: "Scribe",
+};
+const LLM_ROLES: RoleKey[] = ["architect", "grunt", "pedant", "scribe"];
+
+function createDefaultLlmSettingsDraft(): UpdateCompanyLlmSettings {
+  return {
+    execution_gate: {
+      mode: "always_proceed",
+      scope: "major_only",
+    },
+    llm: {
+      default_provider: "vllm_openai_compatible",
+      default_model: "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      providers: {
+        vllm_openai_compatible: {
+          enabled: true,
+          base_url: "http://vllm:8000/v1",
+          api_key: "",
+        },
+      },
+      role_models: {},
+      guardrails: {
+        allowed_models: [],
+        max_timeout_seconds: 120,
+        role_retries: {},
+      },
+    },
+  };
+}
+
+function toLlmSettingsDraft(settings: CompanyLlmSettings): UpdateCompanyLlmSettings {
+  const cloned = JSON.parse(JSON.stringify(settings)) as UpdateCompanyLlmSettings;
+  if (!cloned.llm.guardrails) {
+    cloned.llm.guardrails = {
+      allowed_models: [],
+      max_timeout_seconds: 120,
+      role_retries: {},
+    };
+  }
+  for (const role of LLM_ROLES) {
+    const entry = cloned.llm.role_models[role];
+    if (entry && (!entry.provider || !entry.model)) {
+      delete cloned.llm.role_models[role];
+    }
+  }
+  return cloned;
+}
 
 function createManagedEnvState<T>(value: T): Record<ManagedEnvKey, T> {
   return {
@@ -121,6 +189,40 @@ export function CompanySettings() {
     () => createManagedEnvState(false),
   );
   const [syncEnvToAgents, setSyncEnvToAgents] = useState(true);
+  const [llmSettingsDraft, setLlmSettingsDraft] = useState<UpdateCompanyLlmSettings>(
+    () => createDefaultLlmSettingsDraft(),
+  );
+  const [llmTestRole, setLlmTestRole] = useState<RoleKey>("architect");
+  const [llmTestResultText, setLlmTestResultText] = useState<string | null>(null);
+  const [llmModelsPreviewText, setLlmModelsPreviewText] = useState<string | null>(null);
+
+  const llmProvidersQuery = useQuery({
+    queryKey: queryKeys.companies.llmProviders,
+    queryFn: () => companiesApi.listLlmProviders(),
+  });
+
+  const llmSettingsQuery = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.companies.llmSettings(selectedCompanyId) : ["companies", "llm-settings", "none"],
+    queryFn: () => companiesApi.getLlmSettings(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+
+  const llmModelsQuery = useQuery({
+    queryKey: queryKeys.companies.llmModels(
+      llmSettingsDraft.llm.default_provider,
+      llmSettingsDraft.llm.providers[llmSettingsDraft.llm.default_provider]?.base_url ?? null,
+    ),
+    queryFn: () =>
+      companiesApi.listLlmModels({
+        provider: llmSettingsDraft.llm.default_provider,
+        base_url: llmSettingsDraft.llm.providers[llmSettingsDraft.llm.default_provider]?.base_url,
+      }),
+    enabled: Boolean(
+      llmSettingsDraft.llm.default_provider
+      && llmSettingsDraft.llm.providers[llmSettingsDraft.llm.default_provider]?.enabled !== false,
+    ),
+    staleTime: 30_000,
+  });
 
   const secretsQuery = useQuery({
     queryKey: selectedCompanyId ? queryKeys.secrets.list(selectedCompanyId) : ["secrets", "none"],
@@ -150,6 +252,11 @@ export function CompanySettings() {
     return map;
   }, [secretsQuery.data]);
 
+  useEffect(() => {
+    if (!llmSettingsQuery.data?.settings) return;
+    setLlmSettingsDraft(toLlmSettingsDraft(llmSettingsQuery.data.settings));
+  }, [llmSettingsQuery.data]);
+
   const generalDirty =
     !!selectedCompany &&
     (companyName !== selectedCompany.name ||
@@ -175,6 +282,108 @@ export function CompanySettings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
     }
+  });
+
+  const llmSaveMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCompanyId) throw new Error("Select a company first.");
+      const payload = JSON.parse(JSON.stringify(llmSettingsDraft)) as UpdateCompanyLlmSettings;
+      return companiesApi.updateLlmSettings(selectedCompanyId, payload);
+    },
+    onSuccess: async (result) => {
+      setLlmSettingsDraft(toLlmSettingsDraft(result.settings));
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.companies.llmSettings(selectedCompanyId!),
+      });
+      pushToast({
+        tone: "success",
+        title: "AI/Models settings saved",
+        body: "Provider, model, and role mappings were updated.",
+      });
+    },
+    onError: (err) => {
+      pushToast({
+        tone: "error",
+        title: "Failed to save AI/Models settings",
+        body: err instanceof Error ? err.message : "Unknown error",
+      });
+    },
+  });
+
+  const llmTestConnectionMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCompanyId) throw new Error("Select a company first.");
+      const provider = llmSettingsDraft.llm.default_provider;
+      const providerConfig = llmSettingsDraft.llm.providers[provider];
+      const payload: TestCompanyLlmSettings = {
+        provider,
+        model: llmSettingsDraft.llm.default_model,
+        base_url: providerConfig?.base_url,
+        api_key: providerConfig?.api_key,
+        timeout_seconds: providerConfig?.timeout_seconds,
+      };
+      return companiesApi.testLlmSettings(selectedCompanyId, payload);
+    },
+    onSuccess: (result) => {
+      setLlmTestResultText(
+        `Connection test: ${result.probe.status}. ${result.probe.message ?? ""}`.trim(),
+      );
+      pushToast({
+        tone: result.probe.status === "ok" ? "success" : "warn",
+        title: "Test connection complete",
+        body: result.probe.message ?? `Probe status: ${result.probe.status}`,
+      });
+    },
+    onError: (err) => {
+      setLlmTestResultText(err instanceof Error ? err.message : "Connection test failed");
+      pushToast({
+        tone: "error",
+        title: "Connection test failed",
+        body: err instanceof Error ? err.message : "Unknown error",
+      });
+    },
+  });
+
+  const llmTestRoleMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCompanyId) throw new Error("Select a company first.");
+      const roleEntry = llmSettingsDraft.llm.role_models[llmTestRole];
+      const provider = roleEntry?.provider ?? llmSettingsDraft.llm.default_provider;
+      const model = roleEntry?.model ?? llmSettingsDraft.llm.default_model;
+      const providerConfig = llmSettingsDraft.llm.providers[provider];
+      const payload: TestCompanyLlmSettings = {
+        provider,
+        model,
+        base_url: providerConfig?.base_url,
+        api_key: providerConfig?.api_key,
+        timeout_seconds: providerConfig?.timeout_seconds,
+      };
+      return companiesApi.testLlmSettings(selectedCompanyId, payload);
+    },
+    onSuccess: (result) => {
+      const availabilityText =
+        result.modelAvailable === null
+          ? "Model availability unknown"
+          : result.modelAvailable
+            ? "Model found"
+            : "Model not found";
+      setLlmTestResultText(
+        `${ROLE_LABELS[llmTestRole]} test: ${result.probe.status}. ${availabilityText}.`,
+      );
+      pushToast({
+        tone: result.modelAvailable === false ? "warn" : "success",
+        title: `${ROLE_LABELS[llmTestRole]} test complete`,
+        body: `${result.provider} / ${result.model}`,
+      });
+    },
+    onError: (err) => {
+      setLlmTestResultText(err instanceof Error ? err.message : "Role config test failed");
+      pushToast({
+        tone: "error",
+        title: "Role config test failed",
+        body: err instanceof Error ? err.message : "Unknown error",
+      });
+    },
   });
 
   const inviteMutation = useMutation({
@@ -273,6 +482,8 @@ export function CompanySettings() {
     setSnippetCopyDelightId(0);
     setEnvValues(createManagedEnvState(""));
     setEnvClearFlags(createManagedEnvState(false));
+    setLlmTestResultText(null);
+    setLlmModelsPreviewText(null);
   }, [selectedCompanyId]);
 
   const envMutation = useMutation({
@@ -476,6 +687,75 @@ export function CompanySettings() {
     });
   }
 
+  function patchProviderConfig(
+    provider: LlmProviderId,
+    patch: Partial<NonNullable<UpdateCompanyLlmSettings["llm"]["providers"][LlmProviderId]>>,
+  ) {
+    setLlmSettingsDraft((prev) => ({
+      ...prev,
+      llm: {
+        ...prev.llm,
+        providers: {
+          ...prev.llm.providers,
+          [provider]: {
+            ...(prev.llm.providers[provider] ?? {}),
+            ...patch,
+          },
+        },
+      },
+    }));
+  }
+
+  function patchRoleModel(role: RoleKey, patch: Partial<{ provider: LlmProviderId; model: string }>) {
+    setLlmSettingsDraft((prev) => ({
+      ...prev,
+      llm: {
+        ...prev.llm,
+        role_models: {
+          ...prev.llm.role_models,
+          [role]: {
+            provider: prev.llm.role_models[role]?.provider ?? prev.llm.default_provider,
+            model: prev.llm.role_models[role]?.model ?? prev.llm.default_model,
+            ...patch,
+          },
+        },
+      },
+    }));
+  }
+
+  function clearRoleOverride(role: RoleKey) {
+    setLlmSettingsDraft((prev) => {
+      const nextRoleModels = { ...prev.llm.role_models };
+      delete nextRoleModels[role];
+      return {
+        ...prev,
+        llm: {
+          ...prev.llm,
+          role_models: nextRoleModels,
+        },
+      };
+    });
+  }
+
+  function patchLlmGuardrails(
+    patch: Partial<NonNullable<UpdateCompanyLlmSettings["llm"]["guardrails"]>>,
+  ) {
+    setLlmSettingsDraft((prev) => ({
+      ...prev,
+      llm: {
+        ...prev.llm,
+        guardrails: {
+          ...(prev.llm.guardrails ?? {
+            allowed_models: [],
+            max_timeout_seconds: 120,
+            role_retries: {},
+          }),
+          ...patch,
+        },
+      },
+    }));
+  }
+
   return (
     <div className="max-w-2xl space-y-6">
       <div className="flex items-center gap-2">
@@ -644,6 +924,362 @@ export function CompanySettings() {
             checked={!!selectedCompany.requireBoardApprovalForNewAgents}
             onChange={(v) => settingsMutation.mutate(v)}
           />
+        </div>
+      </div>
+
+      {/* AI / Models */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          AI / Models
+        </div>
+        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+          <p className="text-sm text-muted-foreground">
+            Configure provider, base URL, API key, and per-role model mappings. API keys are masked after save and can be replaced without exposing current values.
+          </p>
+
+          <div className="grid gap-3 rounded-md border border-border/60 px-3 py-3 md:grid-cols-2">
+            <Field
+              label="Execution mode"
+              hint="always_proceed starts agents immediately. ask_before_proceed requires a user decision first."
+            >
+              <select
+                className={cn(nativeSelectClassName, "w-full")}
+                value={llmSettingsDraft.execution_gate.mode}
+                onChange={(e) =>
+                  setLlmSettingsDraft((prev) => ({
+                    ...prev,
+                    execution_gate: {
+                      ...prev.execution_gate,
+                      mode: e.target.value as "always_proceed" | "ask_before_proceed",
+                    },
+                  }))
+                }
+              >
+                <option value="always_proceed">always_proceed</option>
+                <option value="ask_before_proceed">ask_before_proceed</option>
+              </select>
+            </Field>
+            <Field
+              label="Ask scope"
+              hint="major_only gates only major actions; every_issue gates all new issues."
+            >
+              <select
+                className={cn(nativeSelectClassName, "w-full")}
+                value={llmSettingsDraft.execution_gate.scope}
+                onChange={(e) =>
+                  setLlmSettingsDraft((prev) => ({
+                    ...prev,
+                    execution_gate: {
+                      ...prev.execution_gate,
+                      scope: e.target.value as "major_only" | "every_issue",
+                    },
+                  }))
+                }
+                disabled={llmSettingsDraft.execution_gate.mode !== "ask_before_proceed"}
+              >
+                <option value="major_only">major_only</option>
+                <option value="every_issue">every_issue</option>
+              </select>
+            </Field>
+          </div>
+
+          {llmSettingsQuery.isLoading && (
+            <p className="text-xs text-muted-foreground">Loading AI/Models settings...</p>
+          )}
+          {llmSettingsQuery.error && (
+            <p className="text-xs text-destructive">
+              {llmSettingsQuery.error instanceof Error
+                ? llmSettingsQuery.error.message
+                : "Failed to load AI/Models settings"}
+            </p>
+          )}
+
+          <Field
+            label="Provider"
+            hint="Primary provider used by default and as role fallback."
+          >
+            <select
+              className={cn(nativeSelectClassName, "w-full")}
+              value={llmSettingsDraft.llm.default_provider}
+              onChange={(e) => {
+                const provider = e.target.value as LlmProviderId;
+                setLlmSettingsDraft((prev) => ({
+                  ...prev,
+                  llm: {
+                    ...prev.llm,
+                    default_provider: provider,
+                    providers: {
+                      ...prev.llm.providers,
+                      [provider]: {
+                        ...(prev.llm.providers[provider] ?? { enabled: true }),
+                      },
+                    },
+                  },
+                }));
+              }}
+            >
+              {(llmProvidersQuery.data ?? []).map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {(() => {
+            const provider = llmSettingsDraft.llm.default_provider;
+            const providerConfig = llmSettingsDraft.llm.providers[provider] ?? { enabled: true };
+            const visibleApiKeyValue =
+              providerConfig.api_key === "***REDACTED***" ? "" : (providerConfig.api_key ?? "");
+            return (
+              <div className="space-y-3 rounded-md border border-border/60 px-3 py-3">
+                <Field
+                  label="Base URL"
+                  hint="Required for self-hosted/OpenAI-compatible providers (e.g. http://vllm:8000/v1)."
+                >
+                  <input
+                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                    type="url"
+                    value={providerConfig.base_url ?? ""}
+                    placeholder="http://vllm:8000/v1"
+                    onChange={(e) => patchProviderConfig(provider, { base_url: e.target.value })}
+                  />
+                </Field>
+                <Field
+                  label="API Key"
+                  hint={
+                    providerConfig.api_key === "***REDACTED***"
+                      ? "A key is already configured. Leave blank to keep, or enter a new key to replace."
+                      : "Provider API key (if required)."
+                  }
+                >
+                  <input
+                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none"
+                    type="password"
+                    value={visibleApiKeyValue}
+                    placeholder={providerConfig.api_key === "***REDACTED***" ? "Configured (hidden)" : "sk-..."}
+                    onChange={(e) => patchProviderConfig(provider, { api_key: e.target.value })}
+                  />
+                </Field>
+                <Field
+                  label="Default model"
+                  hint="Used when role-specific overrides are not set."
+                >
+                  <input
+                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                    type="text"
+                    value={llmSettingsDraft.llm.default_model}
+                    onChange={(e) =>
+                      setLlmSettingsDraft((prev) => ({
+                        ...prev,
+                        llm: { ...prev.llm, default_model: e.target.value },
+                      }))
+                    }
+                    placeholder="meta-llama/Meta-Llama-3.1-8B-Instruct"
+                  />
+                </Field>
+              </div>
+            );
+          })()}
+
+          <div className="space-y-2 rounded-md border border-border/60 px-3 py-3">
+            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              Per-role model mapping
+            </div>
+            {LLM_ROLES.map((role) => {
+              const roleEntry = llmSettingsDraft.llm.role_models[role];
+              return (
+                <div key={role} className="grid gap-2 rounded-md border border-border/50 px-2.5 py-2 md:grid-cols-[120px_1fr_1fr_auto]">
+                  <div className="text-sm font-medium">{ROLE_LABELS[role]}</div>
+                  <select
+                    className={cn(nativeSelectClassName, "w-full")}
+                    value={roleEntry?.provider ?? llmSettingsDraft.llm.default_provider}
+                    onChange={(e) =>
+                      patchRoleModel(role, { provider: e.target.value as LlmProviderId })
+                    }
+                  >
+                    {(llmProvidersQuery.data ?? []).map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                    type="text"
+                    value={roleEntry?.model ?? ""}
+                    placeholder={llmSettingsDraft.llm.default_model}
+                    onChange={(e) => patchRoleModel(role, { model: e.target.value })}
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => clearRoleOverride(role)}
+                    disabled={!roleEntry}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="space-y-2 rounded-md border border-border/60 px-3 py-3">
+            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              Guardrails and cost controls
+            </div>
+            <Field
+              label="Allowed models (optional allowlist)"
+              hint="Comma-separated model IDs. Leave blank to allow all models."
+            >
+              <input
+                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                type="text"
+                value={(llmSettingsDraft.llm.guardrails?.allowed_models ?? []).join(", ")}
+                placeholder="meta-llama/Meta-Llama-3.1-8B-Instruct, gpt-4o"
+                onChange={(e) => {
+                  const allowedModels = e.target.value
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter((value) => value.length > 0);
+                  patchLlmGuardrails({ allowed_models: allowedModels });
+                }}
+              />
+            </Field>
+            <div className="grid gap-2 md:grid-cols-2">
+              <Field
+                label="Max timeout (seconds)"
+                hint="Hard cap applied at runtime."
+              >
+                <input
+                  className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                  type="number"
+                  min={1}
+                  max={600}
+                  value={llmSettingsDraft.llm.guardrails?.max_timeout_seconds ?? 120}
+                  onChange={(e) => patchLlmGuardrails({ max_timeout_seconds: Math.max(1, Number(e.target.value || 120)) })}
+                />
+              </Field>
+              <Field
+                label="Max tokens/request (optional)"
+                hint="Upper bound for model response token budget."
+              >
+                <input
+                  className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                  type="number"
+                  min={1}
+                  max={1_000_000}
+                  value={llmSettingsDraft.llm.guardrails?.max_tokens_per_request ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    patchLlmGuardrails({
+                      max_tokens_per_request: raw ? Math.max(1, Number(raw)) : undefined,
+                    });
+                  }}
+                  placeholder="Optional"
+                />
+              </Field>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">Per-role retries</p>
+              <div className="grid gap-2 md:grid-cols-4">
+                {LLM_ROLES.map((role) => (
+                  <label key={`retry-${role}`} className="space-y-1">
+                    <span className="text-xs text-muted-foreground">{ROLE_LABELS[role]}</span>
+                    <input
+                      className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+                      type="number"
+                      min={0}
+                      max={5}
+                      value={llmSettingsDraft.llm.guardrails?.role_retries?.[role] ?? 0}
+                      onChange={(e) =>
+                        patchLlmGuardrails({
+                          role_retries: {
+                            ...(llmSettingsDraft.llm.guardrails?.role_retries ?? {}),
+                            [role]: Math.max(0, Number(e.target.value || 0)),
+                          },
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => llmTestConnectionMutation.mutate()}
+              disabled={llmTestConnectionMutation.isPending}
+            >
+              {llmTestConnectionMutation.isPending ? "Testing..." : "Test Connection"}
+            </Button>
+            <select
+              className={cn(nativeSelectClassName, "min-w-[10rem]")}
+              value={llmTestRole}
+              onChange={(e) => setLlmTestRole(e.target.value as RoleKey)}
+            >
+              {LLM_ROLES.map((role) => (
+                <option key={role} value={role}>
+                  {ROLE_LABELS[role]}
+                </option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => llmTestRoleMutation.mutate()}
+              disabled={llmTestRoleMutation.isPending}
+            >
+              {llmTestRoleMutation.isPending ? "Testing role..." : "Test Role Config"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                const probe = llmModelsQuery.data;
+                if (!probe) {
+                  setLlmModelsPreviewText("No model list available yet.");
+                  return;
+                }
+                const preview = probe.models.slice(0, 20).join(", ");
+                setLlmModelsPreviewText(
+                  probe.models.length > 0
+                    ? `Provider ${probe.provider}: ${probe.models.length} model(s). ${preview}`
+                    : `Provider ${probe.provider}: no models returned (${probe.status}).`,
+                );
+              }}
+              disabled={llmModelsQuery.isFetching}
+            >
+              {llmModelsQuery.isFetching ? "Refreshing models..." : "Refresh Models"}
+            </Button>
+          </div>
+
+          {llmTestResultText && (
+            <p className="text-xs text-muted-foreground">{llmTestResultText}</p>
+          )}
+          {llmModelsPreviewText && (
+            <p className="text-xs text-muted-foreground">{llmModelsPreviewText}</p>
+          )}
+
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => llmSaveMutation.mutate()}
+              disabled={llmSaveMutation.isPending}
+            >
+              {llmSaveMutation.isPending ? "Saving..." : "Save AI/Models"}
+            </Button>
+            {llmSaveMutation.isError && (
+              <span className="text-xs text-destructive">
+                {llmSaveMutation.error instanceof Error
+                  ? llmSaveMutation.error.message
+                  : "Failed to save AI/Models settings"}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 

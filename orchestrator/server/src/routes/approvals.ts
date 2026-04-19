@@ -10,12 +10,15 @@ import {
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
 import {
+  agentService,
   approvalService,
   heartbeatService,
   issueApprovalService,
+  issueService,
   logActivity,
   secretService,
 } from "../services/index.js";
+import { wakeAgentsAfterHumanGateClears } from "../services/issue-assignment-wakeup.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 
@@ -31,6 +34,8 @@ export function approvalRoutes(db: Db) {
   const svc = approvalService(db);
   const heartbeat = heartbeatService(db);
   const issueApprovalsSvc = issueApprovalService(db);
+  const issuesSvc = issueService(db);
+  const agentsSvc = agentService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
@@ -131,6 +136,26 @@ export function approvalRoutes(db: Db) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const primaryIssueId = linkedIssueIds[0] ?? null;
+      const awaitingIssueIds = linkedIssues
+        .filter((issue) => issue.status === "awaiting_human_approval")
+        .map((issue) => issue.id);
+
+      for (const issueId of awaitingIssueIds) {
+        const updated = await issuesSvc.update(issueId, { status: "todo" });
+        if (updated) {
+          wakeAgentsAfterHumanGateClears({
+            heartbeat,
+            agentsSvc,
+            issue: updated,
+            approval: { id: approval.id, requestedByAgentId: approval.requestedByAgentId },
+            mutation: "update",
+            contextSource: "approval.approved",
+            requestedByActorType: "user",
+            requestedByActorId: req.actor.userId ?? "board",
+            skipRequesterWake: true,
+          });
+        }
+      }
 
       await logActivity(db, {
         companyId: approval.companyId,
@@ -143,6 +168,7 @@ export function approvalRoutes(db: Db) {
           type: approval.type,
           requestedByAgentId: approval.requestedByAgentId,
           linkedIssueIds,
+          resumedIssueIds: awaitingIssueIds,
         },
       });
 

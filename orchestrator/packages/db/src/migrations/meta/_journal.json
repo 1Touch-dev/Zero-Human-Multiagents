@@ -330,6 +330,13 @@
       "when": 1776391200000,
       "tag": "0046_silent_norrin_radd",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1776480000000,
+      "tag": "0047_loud_high_evolutionary",
+      "breakpoints": true
     }
   ]
 }

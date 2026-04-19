@@ -17,6 +17,26 @@ export {
 } from "./budget.js";
 
 export {
+  LLM_PROVIDER_IDS,
+  llmProviderIdSchema,
+  llmRoleKeySchema,
+  executionApprovalModeSchema,
+  executionApprovalScopeSchema,
+  companyLlmSettingsSchema,
+  updateCompanyLlmSettingsSchema,
+  testCompanyLlmSettingsSchema,
+  listLlmModelsQuerySchema,
+  issueExecutionPreviewDecisionSchema,
+  DEFAULT_COMPANY_LLM_SETTINGS,
+  type LlmProviderId,
+  type CompanyLlmSettings,
+  type UpdateCompanyLlmSettings,
+  type TestCompanyLlmSettings,
+  type ListLlmModelsQuery,
+  type IssueExecutionPreviewDecision,
+} from "./llm-settings.js";
+
+export {
   createCompanySchema,
   updateCompanySchema,
   updateCompanyBrandingSchema,

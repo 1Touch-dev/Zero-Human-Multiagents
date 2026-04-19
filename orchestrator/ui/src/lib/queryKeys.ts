@@ -3,6 +3,10 @@ export const queryKeys = {
     all: ["companies"] as const,
     detail: (id: string) => ["companies", id] as const,
     stats: ["companies", "stats"] as const,
+    llmSettings: (companyId: string) => ["companies", companyId, "llm-settings"] as const,
+    llmProviders: ["companies", "llm-providers"] as const,
+    llmModels: (provider: string, baseUrl: string | null) =>
+      ["companies", "llm-models", provider, baseUrl ?? ""] as const,
   },
   companySkills: {
     list: (companyId: string) => ["company-skills", companyId] as const,
@@ -44,6 +48,7 @@ export const queryKeys = {
     activity: (issueId: string) => ["issues", "activity", issueId] as const,
     runs: (issueId: string) => ["issues", "runs", issueId] as const,
     approvals: (issueId: string) => ["issues", "approvals", issueId] as const,
+    executionPreview: (issueId: string) => ["issues", "execution-preview", issueId] as const,
     liveRuns: (issueId: string) => ["issues", "live-runs", issueId] as const,
     activeRun: (issueId: string) => ["issues", "active-run", issueId] as const,
     workProducts: (issueId: string) => ["issues", "work-products", issueId] as const,

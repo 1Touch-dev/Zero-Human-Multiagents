@@ -25,6 +25,21 @@ PAPERCLIP_PORT=3200 PAPERCLIP_DATA_DIR=./data/pc \
   docker compose -f docker-compose.quickstart.yml up --build
 ```
 
+## Add vLLM (OpenAI-Compatible `/v1`)
+
+To run Paperclip with a colocated vLLM service:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.vllm.yml up --build
+```
+
+Then configure Company LLM Settings to use:
+
+- Provider: `vllm_openai_compatible`
+- Base URL: `http://vllm:8000/v1`
+
+See the full guide: [vLLM Deployment](/deploy/vllm).
+
 ## Manual Docker Build
 
 ```sh

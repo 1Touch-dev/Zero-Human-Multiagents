@@ -17,3 +17,10 @@ out/
 # Binary/Large Assets
 *.pdf
 *.log
+
+# Local Paperclip instance / dev artifacts
+orchestrator/.paperclip/
+
+# Playwright / e2e output
+orchestrator/tests/e2e/playwright-report/
+orchestrator/tests/e2e/test-results/

@@ -15,6 +15,7 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_HOME` | `~/.paperclip` | Base directory for all Paperclip data |
 | `PAPERCLIP_INSTANCE_ID` | `default` | Instance identifier (for multiple local instances) |
 | `PAPERCLIP_DEPLOYMENT_MODE` | `local_trusted` | Runtime mode override |
+| `ZERO_HUMAN_DYNAMIC_LLM_ENABLED` | `false` | Enables dynamic provider/model routing from Company Settings in bridge runtime |
 
 ## Secrets
 

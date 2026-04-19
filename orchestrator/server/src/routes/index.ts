@@ -14,5 +14,6 @@ export { dashboardRoutes } from "./dashboard.js";
 export { sidebarBadgeRoutes } from "./sidebar-badges.js";
 export { channelRoutes } from "./channels.js";
 export { llmRoutes } from "./llms.js";
+export { companyLlmSettingsRoutes } from "./company-llm-settings.js";
 export { accessRoutes } from "./access.js";
 export { instanceSettingsRoutes } from "./instance-settings.js";

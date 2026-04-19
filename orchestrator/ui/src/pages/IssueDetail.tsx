@@ -36,6 +36,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
   Activity as ActivityIcon,
   Check,
@@ -211,6 +212,8 @@ export function IssueDetail() {
   });
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
+  const [executionGateOpen, setExecutionGateOpen] = useState(false);
+  const [executionDecisionNote, setExecutionDecisionNote] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const lastMarkedReadIssueIdRef = useRef<string | null>(null);
 
@@ -243,6 +246,11 @@ export function IssueDetail() {
   const { data: linkedApprovals } = useQuery({
     queryKey: queryKeys.issues.approvals(issueId!),
     queryFn: () => issuesApi.listApprovals(issueId!),
+    enabled: !!issueId,
+  });
+  const { data: executionPreview } = useQuery({
+    queryKey: queryKeys.issues.executionPreview(issueId!),
+    queryFn: () => issuesApi.getExecutionPreview(issueId!),
     enabled: !!issueId,
   });
 
@@ -452,6 +460,7 @@ export function IssueDetail() {
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(issueId!) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.runs(issueId!) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.approvals(issueId!) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.issues.executionPreview(issueId!) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.attachments(issueId!) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.documents(issueId!) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.liveRuns(issueId!) });
@@ -510,6 +519,28 @@ export function IssueDetail() {
     onSuccess: () => {
       invalidateIssue();
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(issueId!) });
+    },
+  });
+  const decideExecutionPreview = useMutation({
+    mutationFn: (data: { decision: "approve" | "reject" | "request_changes"; note?: string | null }) =>
+      issuesApi.decideExecutionPreview(issueId!, data),
+    onSuccess: (result) => {
+      invalidateIssue();
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.executionPreview(issueId!) });
+      setExecutionGateOpen(false);
+      setExecutionDecisionNote("");
+      pushToast({
+        tone: result.decision === "approve" ? "success" : "warn",
+        title: "Execution decision saved",
+        body: `Decision: ${result.decision.replace("_", " ")}`,
+      });
+    },
+    onError: (err) => {
+      pushToast({
+        tone: "error",
+        title: "Failed to save decision",
+        body: err instanceof Error ? err.message : "Unknown error",
+      });
     },
   });
 
@@ -1162,6 +1193,96 @@ export function IssueDetail() {
           </CollapsibleContent>
         </Collapsible>
       )}
+
+      {executionPreview?.mode === "ask_before_proceed" && issue.status === "awaiting_human_approval" && (
+        <div className="rounded-lg border border-border p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium">Ask Before Proceed</p>
+              <p className="text-xs text-muted-foreground">
+                Execution is paused pending your decision.
+              </p>
+            </div>
+            <Button size="sm" onClick={() => setExecutionGateOpen(true)}>
+              Review Preview
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <Dialog open={executionGateOpen} onOpenChange={setExecutionGateOpen}>
+        <DialogContent className="max-w-2xl">
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold">Execution Preview</h3>
+            {!executionPreview ? (
+              <p className="text-xs text-muted-foreground">Loading preview…</p>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Mode: {executionPreview.mode} | Scope: {executionPreview.scope}
+                </p>
+                {executionPreview.preview.majorCategories.length > 0 && (
+                  <div className="rounded-md border border-border/60 px-2.5 py-2">
+                    <p className="text-xs font-medium">Major categories</p>
+                    <p className="text-xs text-muted-foreground">
+                      {executionPreview.preview.majorCategories.join(", ")}
+                    </p>
+                  </div>
+                )}
+                <div className="rounded-md border border-border/60 px-2.5 py-2">
+                  <p className="text-xs font-medium">Role plan</p>
+                  <div className="mt-1 space-y-1">
+                    {executionPreview.preview.rolePlan.map((role) => (
+                      <p key={role.role} className="text-xs text-muted-foreground">
+                        {role.role}: {role.provider} / {role.model} ({role.source})
+                      </p>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-md border border-border/60 px-2.5 py-2">
+                  <p className="text-xs font-medium">Planned actions</p>
+                  <div className="mt-1 space-y-1">
+                    {executionPreview.preview.plannedActions.map((action) => (
+                      <p key={action} className="text-xs text-muted-foreground">- {action}</p>
+                    ))}
+                  </div>
+                </div>
+                <textarea
+                  className="h-24 w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none"
+                  placeholder="Optional decision note (why approve/reject/request changes)"
+                  value={executionDecisionNote}
+                  onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setExecutionDecisionNote(e.target.value)}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => decideExecutionPreview.mutate({ decision: "approve", note: executionDecisionNote || undefined })}
+                    disabled={decideExecutionPreview.isPending}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => decideExecutionPreview.mutate({ decision: "request_changes", note: executionDecisionNote || undefined })}
+                    disabled={decideExecutionPreview.isPending}
+                  >
+                    Request Changes
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => decideExecutionPreview.mutate({ decision: "reject", note: executionDecisionNote || undefined })}
+                    disabled={decideExecutionPreview.isPending}
+                  >
+                    Reject
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
 
       {/* Mobile properties drawer */}
