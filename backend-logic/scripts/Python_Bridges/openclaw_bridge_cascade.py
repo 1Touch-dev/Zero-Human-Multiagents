@@ -3,6 +3,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -1080,28 +1081,40 @@ def main():
                 input_summary=f"{identifier} - {title}",
                 metadata={"role_key": role_key},
             )
+        workspace_dir = os.environ.get("ZERO_HUMAN_WORKSPACE_DIR", "/tmp/zero-human-sandbox").strip() or "/tmp/zero-human-sandbox"
+        repo_url = os.environ.get("ZERO_HUMAN_WORKSPACE_REPO_URL")
+        is_first_role = current_idx in (None, 0)
+        has_existing_git = os.path.isdir(os.path.join(workspace_dir, ".git"))
+
         if run_bash:
             run_bash(["/usr/bin/openclaw", "models", "set", target_model], env=env, check=False)
-            # Full removal including .git so each run starts from a clean slate.
-            # "rm -rf /tmp/zero-human-sandbox/*" misses hidden dirs (.git) and
-            # leaves stale branch state that causes wrong head branch on PR creation.
-            run_bash("rm -rf /tmp/zero-human-sandbox && mkdir -p /tmp/zero-human-sandbox", check=False)
         else:
             subprocess.run(["/usr/bin/openclaw", "models", "set", target_model], env=env, check=False)
-            subprocess.run(
-                "rm -rf /tmp/zero-human-sandbox && mkdir -p /tmp/zero-human-sandbox",
-                shell=True,
-                check=False,
-            )
-        if ensure_dir:
-            ensure_dir("/tmp/zero-human-sandbox")
-        else:
-            subprocess.run(["mkdir", "-p", "/tmp/zero-human-sandbox"], check=False)
 
-        repo_url = os.environ.get("ZERO_HUMAN_WORKSPACE_REPO_URL")
-        if repo_url and clone_repo:
+        # Keep the same sandbox across roles for the same issue so Architect/Grunt/Pedant
+        # handoff artifacts and commits are available to Scribe. Only the first role starts
+        # from a clean clone.
+        if is_first_role:
+            if run_bash:
+                run_bash(f"rm -rf {shlex.quote(workspace_dir)} && mkdir -p {shlex.quote(workspace_dir)}", check=False)
+            else:
+                subprocess.run(
+                    f"rm -rf {shlex.quote(workspace_dir)} && mkdir -p {shlex.quote(workspace_dir)}",
+                    shell=True,
+                    check=False,
+                )
+            has_existing_git = False
+        elif has_existing_git:
+            print(f">>> Reusing existing sandbox for role handoff: {workspace_dir}")
+
+        if ensure_dir:
+            ensure_dir(workspace_dir)
+        else:
+            subprocess.run(["mkdir", "-p", workspace_dir], check=False)
+
+        if repo_url and clone_repo and (is_first_role or not has_existing_git):
             print(f">>> Auto-initializing sandbox from {repo_url}...")
-            clone_repo(repo_url, "/tmp/zero-human-sandbox")
+            clone_repo(repo_url, workspace_dir)
 
         message = build_role_prompt(
             role_key,
@@ -1305,7 +1318,7 @@ def main():
             if sweep_sandbox_output:
                 try:
                     offloaded_uris = sweep_sandbox_output(
-                        "/tmp/zero-human-sandbox",
+                        workspace_dir,
                         identifier=identifier,
                         run_id=run_id,
                         delete_after_upload=True,
@@ -1325,7 +1338,6 @@ def main():
                     print(f">>> S3 sweep failed for {identifier} (non-fatal): {sweep_err}", file=sys.stderr)
 
         if is_scribe:
-            workspace_dir = os.environ.get("ZERO_HUMAN_WORKSPACE_DIR", "/tmp/zero-human-sandbox").strip()
             created_readme = ensure_project_readme(workspace_dir, identifier, title, description)
             if created_readme:
                 print(f">>> Scribe safeguard created missing README: {created_readme}")
