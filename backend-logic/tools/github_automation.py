@@ -93,6 +93,45 @@ def _safe_auto_commit(repo_path: str, message: str) -> bool:
     return commit_result.returncode == 0
 
 
+def _ensure_commit_ahead_of_base(repo_path: str, *, base_branch: str, identifier: str) -> None:
+    """If HEAD has no commits ahead of any remote tracking branch for base, add a sentinel file and commit.
+
+    Scribe (LLM) sometimes finishes without committing; PR automation requires at least one
+    diverging commit. This keeps tool_first + auto PR reliable without relying on model behavior.
+    """
+    base = (base_branch or "main").strip() or "main"
+    _git(["fetch", "--all"], repo_path=repo_path, check=False)
+    remotes = _list_remotes(repo_path)
+    ahead_max = 0
+    for remote_name in remotes:
+        remote_base = f"{remote_name}/{base}"
+        rev_count = _git(["rev-list", "--count", f"{remote_base}..HEAD"], repo_path=repo_path, check=False)
+        if rev_count.returncode == 0:
+            try:
+                ahead_max = max(ahead_max, int((rev_count.stdout or "0").strip() or "0"))
+            except ValueError:
+                pass
+    if ahead_max > 0:
+        return
+
+    safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", (identifier or "issue").strip()) or "issue"
+    marker_dir = Path(repo_path) / ".zero-human"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = marker_dir / f"automation-marker-{safe_id}.md"
+    marker_path.write_text(
+        "# Zero Human automation marker\n\n"
+        f"This file was generated automatically so a pull request can be opened for **{safe_id}** "
+        "when the Scribe phase did not produce a separate git commit.\n\n"
+        "Safe to delete after the PR is merged.\n",
+        encoding="utf-8",
+    )
+    if not _safe_auto_commit(repo_path, f"chore(zero-human): automation marker for {safe_id}"):
+        raise RuntimeError(
+            "No commits ahead of base and failed to create sentinel commit for PR automation. "
+            "Check git user config and repository permissions."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -255,6 +294,7 @@ def create_pr_from_repo(
     title: str,
     body: str,
     base_branch: str | None = None,
+    marker_identifier: str | None = None,
 ) -> str:
     """Create a PR from whatever repo/token is in the environment.
 
@@ -298,6 +338,13 @@ def create_pr_from_repo(
             raise RuntimeError(
                 "Detected uncommitted changes but failed to create an automated commit for PR fallback."
             )
+
+    # If still no divergence from base (Scribe did not commit), add a sentinel commit so gh pr create works.
+    _ensure_commit_ahead_of_base(
+        repo_path,
+        base_branch=base,
+        identifier=(marker_identifier or "").strip() or branch,
+    )
 
     # Discover all remotes and attempt push using token-authenticated URL.
     # Also try ZERO_HUMAN_WORKSPACE_REPO_URL directly so PR automation works
