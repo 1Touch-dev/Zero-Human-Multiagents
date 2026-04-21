@@ -1,0 +1,22 @@
+version: 1
+applications:
+  - appRoot: orchestrator/ui
+    frontend:
+      buildPath: orchestrator
+      phases:
+        preBuild:
+          commands:
+            - corepack enable
+            - corepack prepare pnpm@9.15.4 --activate
+            - pnpm install --frozen-lockfile
+        build:
+          commands:
+            - pnpm --filter @paperclipai/ui build
+      artifacts:
+        baseDirectory: ui/dist
+        files:
+          - "**/*"
+      cache:
+        paths:
+          - /root/.pnpm-store/**/*
+          - node_modules/**/*
