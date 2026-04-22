@@ -141,7 +141,7 @@ A standalone Python script that replaces the old `pnpm paperclipai heartbeat` CL
 
 ## 4. Infrastructure & Services
 
-All services run as systemd units on the EC2 instance (`3.84.177.107`).
+All services run as systemd units on the EC2 instance (`54.198.208.79`).
 
 ### Service Overview
 
@@ -225,7 +225,7 @@ DATABASE_URL="postgresql://paperclip:paperclip@localhost:5432/paperclip"
 # Infrastructure
 # ─────────────────────────────────────────────────────────
 REDIS_URL=redis://localhost:6379/0
-RUNPOD_IP="3.84.177.107"
+RUNPOD_IP="54.198.208.79"
 RUNPOD_PORT="22"
 RUNPOD_USER="ubuntu"
 ```
@@ -283,7 +283,7 @@ Each agent has a specific, bounded role. They hand off **sequentially** — each
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  1. USER creates issue on Dashboard (http://3.84.177.107:3201)  │
+│  1. USER creates issue on Dashboard (http://54.198.208.79:3201)  │
 │     - Sets Assignee: The Architect                               │
 │     - Sets Status: todo                                          │
 └────────────────────────┬────────────────────────────────────────┘
@@ -354,7 +354,7 @@ sudo systemctl status zerohuman-backend-api \
 
 ### Step 1 — Create the Issue
 
-1. Open the dashboard: **http://3.84.177.107:3201**
+1. Open the dashboard: **http://54.198.208.79:3201**
 2. Click **"New Issue"**
 3. Fill in:
    - **Title**: anything short and descriptive (e.g. `Add /status endpoint`)
@@ -727,9 +727,9 @@ PGPASSWORD=paperclip psql -h localhost -U paperclip -d paperclip \
 
 | Resource | URL |
 |---|---|
-| Dashboard | http://3.84.177.107:3201 |
-| FastAPI | http://3.84.177.107:8100 |
-| FastAPI Health | http://3.84.177.107:8100/health |
+| Dashboard | http://54.198.208.79:3201 |
+| FastAPI | http://54.198.208.79:8100 |
+| FastAPI Health | http://54.198.208.79:8100/health |
 | GitHub PRs | https://github.com/Abhishek-AMK/zero-human-sandbox-two/pulls |
 
 ---

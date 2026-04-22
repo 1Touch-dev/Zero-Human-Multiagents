@@ -21,7 +21,7 @@ This document defines the new Version 2 (MVP) testing protocol, which replaces t
 In Version 2, the requirement for appending `gh pr create` flags to your prompts has been **removed**. The system now handles GitHub orchestration automatically via the **"Scribe"** agent.
 
 ### **Step 1: The Trigger**
-1. Open the [Paperclip Dashboard](http://3.84.177.107:3201).
+1. Open the [Paperclip Dashboard](http://54.198.208.79:3201).
 2. Create a **New Issue** (e.g., `PAP-68`).
 3. Set the **Assignee** to **"The Architect"**.
 4. Set the **Status** to **"todo"**.

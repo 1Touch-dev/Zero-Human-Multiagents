@@ -35,10 +35,13 @@ _PLAN_SYSTEM_PROMPT = (
     "- pedant: reviews quality and correctness\n"
     "- scribe: finalizes docs, creates PR (always last)\n\n"
     "Return ONLY a JSON object in this exact format, nothing else:\n"
+    "Include every role the pipeline needs, in order (scribe is always last).\n"
     "{\n"
     '  "plan": [\n'
     '    {"agent": "architect", "task": "brief task description"},\n'
-    '    {"agent": "grunt", "task": "brief task description"}\n'
+    '    {"agent": "grunt", "task": "brief task description"},\n'
+    '    {"agent": "pedant", "task": "brief task description"},\n'
+    '    {"agent": "scribe", "task": "brief task description"}\n'
     "  ]\n"
     "}"
 )
@@ -122,6 +125,25 @@ def _validate_llm_plan(raw_plan: list[dict[str, str]]) -> list[str]:
     return _dedupe_and_validate(keys)
 
 
+def _extend_if_default_role_prefix(plan: list[str]) -> list[str]:
+    """
+    If the plan is exactly DEFAULT_ROLE_ORDER[:n] for some n < len(DEFAULT),
+    extend to the full default chain.
+
+    LLM planners often copy the prompt example and stop after architect+grunt,
+    which would otherwise truncate the cascade and close the issue early.
+    Custom plans like ['pedant', 'scribe'] are left unchanged.
+    """
+    if not plan:
+        return list(DEFAULT_ROLE_ORDER)
+    n = len(plan)
+    if n >= len(DEFAULT_ROLE_ORDER):
+        return plan
+    if plan == list(DEFAULT_ROLE_ORDER[:n]):
+        return list(DEFAULT_ROLE_ORDER)
+    return plan
+
+
 # ---------------------------------------------------------------------------
 # Rule-based fallback
 # ---------------------------------------------------------------------------
@@ -170,12 +192,14 @@ def orchestrate_task(task: dict[str, Any]) -> list[str]:
     if llm_raw is not None:
         plan = _validate_llm_plan(llm_raw)
         if plan:
+            plan = _extend_if_default_role_prefix(plan)
             print(f"ORCHESTRATOR_PLAN identifier={identifier} planner_mode=llm plan={plan}")
             return plan
         print(f">>> Orchestrator [LLM] returned invalid plan for {identifier}. Using rule-based fallback.")
 
     # --- Rule-based fallback ---
     plan = _rule_based_plan(task)
+    plan = _extend_if_default_role_prefix(plan)
     print(f"ORCHESTRATOR_PLAN identifier={identifier} planner_mode=fallback plan={plan}")
     return plan
 
@@ -186,4 +210,6 @@ def sanitize_plan(plan: list[str] | None) -> list[str]:
     Falls back to full default if empty or fully invalid.
     """
     normalized = _dedupe_and_validate(plan or [])
-    return normalized or list(DEFAULT_ROLE_ORDER)
+    if not normalized:
+        return list(DEFAULT_ROLE_ORDER)
+    return _extend_if_default_role_prefix(normalized)
